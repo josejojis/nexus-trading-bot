@@ -1,8 +1,51 @@
 # Nexus Trading Bot
 
-MT5 trading automation with FVG/structure scanning, War Room decisioning, live risk controls, trade management, and a real-time dashboard.
+Nexus Trading Bot is an MT5 trading automation project focused on FVG and structure-based scanning, War Room decisioning, live risk controls, trade management, and a real-time dashboard.
 
 The bot does not trade on a timer. It trades only when signal quality, execution gates, risk checks, lockouts, kill switches, spread safety, and broker checks pass.
+
+## Features
+
+- Real-time dashboard at http://127.0.0.1:5000
+- Fast scanning loop with early-entry support
+- Multi-timeframe analytic and predictive signal evaluation
+- Execution safety gates, cooldowns, and risk controls
+- Trade management with partial TP, trailing SL/TP, and reverse-profit protection
+
+## Quick Start
+
+Windows:
+
+```powershell
+run.bat
+```
+
+Fallback:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe app.py
+```
+
+Linux/Mac:
+
+```bash
+chmod +x run.sh
+./run.sh
+```
+
+Fallback:
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 app.py
+```
+
+## Requirements
+
+- Python 3.10+
+- MetaTrader 5 terminal running and logged in
+- Broker account with supported symbols and lot sizing
 
 ## Core Behavior
 

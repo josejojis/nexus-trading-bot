@@ -47,15 +47,73 @@ class MT5Interface:
             "currency": info.currency,
         }
 
-    def _get_filling_mode(self, symbol: str):
-        """Return the proper filling mode for a symbol."""
+    def _get_filling_modes(self, symbol: str):
+        """Return candidate MT5 order filling policies for a symbol.
+
+        MT5 exposes symbol_info.filling_mode as broker metadata that can behave
+        like a bitmask on some servers. Trade requests, however, require a
+        concrete ORDER_FILLING_* value in the type_filling field.
+        """
+        candidates = []
+
+        def add(mode):
+            if mode is not None and mode not in candidates:
+                candidates.append(mode)
+
         try:
             info = mt5.symbol_info(symbol)
             if info is None:
-                return mt5.ORDER_FILLING_IOC
-            return info.filling_mode
+                return [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+
+            raw_mode = getattr(info, "filling_mode", None)
+            if raw_mode is not None:
+                # Common MT5 bitmask flags: FOK=1, IOC=2. RETURN may not be
+                # represented in the symbol mask but is still useful as a final
+                # fallback for some pending/market-execution brokers.
+                if raw_mode & 2:
+                    add(mt5.ORDER_FILLING_IOC)
+                if raw_mode & 1:
+                    add(mt5.ORDER_FILLING_FOK)
+                if raw_mode in (mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN):
+                    add(raw_mode)
+
+            add(mt5.ORDER_FILLING_IOC)
+            add(mt5.ORDER_FILLING_FOK)
+            add(mt5.ORDER_FILLING_RETURN)
+            return candidates
         except Exception:
-            return mt5.ORDER_FILLING_IOC
+            return [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+
+    def _is_invalid_filling_result(self, result) -> bool:
+        if result is None:
+            return False
+        invalid_fill_code = getattr(mt5, "TRADE_RETCODE_INVALID_FILL", None)
+        if invalid_fill_code is not None and getattr(result, "retcode", None) == invalid_fill_code:
+            return True
+        comment = str(getattr(result, "comment", "") or "").lower()
+        return "filling" in comment or "unsupported filling" in comment
+
+    def _send_order_with_filling_fallback(self, request: dict, symbol: str):
+        """Send an MT5 order request, retrying alternate filling policies."""
+        last_result = None
+        for filling in self._get_filling_modes(symbol):
+            trial = dict(request)
+            trial["type_filling"] = filling
+            trial.pop("filling", None)
+            result = mt5.order_send(trial)
+            last_result = result
+            if result is None:
+                return None
+            if not self._is_invalid_filling_result(result):
+                return result
+            logger.warning(
+                "Order rejected for %s with filling mode %s: [%s] %s; trying next mode",
+                symbol,
+                filling,
+                getattr(result, "retcode", None),
+                getattr(result, "comment", ""),
+            )
+        return last_result
 
     def get_symbol_info(self, symbol: str):
         try:
@@ -207,7 +265,6 @@ class MT5Interface:
                 logger.error(self.last_order_error)
                 return None
             
-            filling = self._get_filling_mode(symbol)
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
@@ -216,11 +273,10 @@ class MT5Interface:
                 "price": price,
                 "sl": sl,
                 "tp": tp,
-                "filling": filling,
                 "comment": "FVG_BUY",
             }
             
-            result = mt5.order_send(request)
+            result = self._send_order_with_filling_fallback(request, symbol)
             
             # CRITICAL FIX: Handle all error codes
             if result is None:
@@ -264,7 +320,6 @@ class MT5Interface:
                 logger.error(self.last_order_error)
                 return None
             
-            filling = self._get_filling_mode(symbol)
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
@@ -273,11 +328,10 @@ class MT5Interface:
                 "price": price,
                 "sl": sl,
                 "tp": tp,
-                "filling": filling,
                 "comment": "FVG_SELL",
             }
             
-            result = mt5.order_send(request)
+            result = self._send_order_with_filling_fallback(request, symbol)
             
             # CRITICAL FIX: Handle all error codes
             if result is None:
@@ -319,7 +373,6 @@ class MT5Interface:
             if not self.ensure_connected():
                 self.last_order_error = "MT5 not connected"
                 return None
-            filling = self._get_filling_mode(symbol)
             request = {
                 "action": mt5.TRADE_ACTION_PENDING,
                 "symbol": symbol,
@@ -328,10 +381,9 @@ class MT5Interface:
                 "price": price,
                 "sl": sl,
                 "tp": tp,
-                "filling": filling,
                 "comment": "PENDING_BUY_LIMIT_FVG",
             }
-            result = mt5.order_send(request)
+            result = self._send_order_with_filling_fallback(request, symbol)
             if result.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED):
                 logger.info(f"BUY_LIMIT pending order placed: {symbol} at {price:.5f}")
                 return result.order
@@ -350,7 +402,6 @@ class MT5Interface:
             if not self.ensure_connected():
                 self.last_order_error = "MT5 not connected"
                 return None
-            filling = self._get_filling_mode(symbol)
             request = {
                 "action": mt5.TRADE_ACTION_PENDING,
                 "symbol": symbol,
@@ -359,10 +410,9 @@ class MT5Interface:
                 "price": price,
                 "sl": sl,
                 "tp": tp,
-                "filling": filling,
                 "comment": "PENDING_SELL_LIMIT_FVG",
             }
-            result = mt5.order_send(request)
+            result = self._send_order_with_filling_fallback(request, symbol)
             if result.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED):
                 logger.info(f"SELL_LIMIT pending order placed: {symbol} at {price:.5f}")
                 return result.order
@@ -534,10 +584,9 @@ class MT5Interface:
                     "position": ticket,
                     "price": price,
                     "deviation": 20,
-                    "filling": self._get_filling_mode(pos.symbol),
                     "comment": comment,
                 }
-                result = mt5.order_send(request)
+                result = self._send_order_with_filling_fallback(request, pos.symbol)
                 if result is None:
                     logger.error(f"Failed to close position {ticket}: No response from MT5")
                     return False

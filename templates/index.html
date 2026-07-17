@@ -32,8 +32,8 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
 </head>
 <body class="min-h-screen bg-slate-950 text-slate-100 antialiased">
-    <div class="min-h-screen bg-slate-950 app-shell" style="display:grid; grid-template-columns:5.5rem minmax(0, 1fr); align-items:stretch;">
-        <aside class="w-72 bg-slate-900 border-r border-slate-800 p-5 flex flex-col gap-6 shadow-neon platform-sidebar" style="grid-column:1; width:5.5rem; min-width:5.5rem; max-width:5.5rem;">
+    <div class="min-h-screen bg-slate-950 app-shell">
+        <aside class="w-72 bg-slate-900 border-r border-slate-800 p-5 flex flex-col gap-6 shadow-neon platform-sidebar">
             <div class="logo flex items-center gap-3 px-3 py-2 rounded-lg bg-gradient-to-br from-indigo-600 to-blue-500 text-white shadow-lg">
                 <span class="brand-mark"><i class="fas fa-chart-simple"></i></span>
                 <div class="brand-copy">
@@ -50,7 +50,7 @@
                     <i class="fas fa-chart-line"></i> Positions
                 </a>
                 <a href="javascript:void(0)" class="nav-link rounded-lg px-3 py-2 hover:bg-slate-800" data-page="future-trades">
-                    <i class="fas fa-radar"></i> Global Radar
+                    <i class="fas fa-satellite-dish"></i> Global Radar
                 </a>
                 <a href="javascript:void(0)" class="nav-link rounded-lg px-3 py-2 hover:bg-slate-800" data-page="logs">
                     <i class="fas fa-file-alt"></i> Logs
@@ -76,7 +76,7 @@
             </div>
         </aside>
 
-        <main class="flex-1 p-5 overflow-hidden platform-main" style="grid-column:2; min-width:0; width:100%;">
+        <main class="flex-1 p-5 overflow-hidden platform-main">
             <header class="flex items-center justify-between px-6 py-4 bg-slate-900 border-b border-slate-800 rounded-tr-xl rounded-br-xl shadow-neon platform-topbar">
                 <div>
                     <div class="eyebrow">Live Operations</div>
@@ -84,7 +84,7 @@
                         <h2 class="text-2xl font-bold">Nexus Trading Bot</h2>
                         <span class="frontend-proof-badge">Updated UI {{ ui_version }}</span>
                     </div>
-                    <p class="text-slate-400">Intent-based operations • risk aware • real-time market feed</p>
+                    <p class="text-slate-400">Intent-based operations | risk aware | real-time market feed</p>
                 </div>
                 <div class="market-toolbar">
                     <div class="symbol-search">
@@ -137,6 +137,7 @@
                             <div class="status-pill">Last <strong id="lastScan">--</strong></div>
                             <div class="status-pill">Next <strong id="nextScan">--</strong></div>
                             <div class="status-pill">Cooldown <strong id="tradeCooldown">--</strong></div>
+                            <div class="status-pill">Best Window <strong id="bestWindowState">--</strong></div>
                             <div class="status-pill">SL Protect <strong id="trailingSlState">On</strong></div>
                             <div class="status-pill">TP Protect <strong id="trailingTpState">On</strong></div>
                             <div class="status-pill">Opp Exit <strong id="opposingExitState">--</strong></div>
@@ -867,8 +868,14 @@
                             <button id="radarNextBtn" class="btn btn-secondary" type="button">Next</button>
                         </div>
                         <div id="globalRadarEmpty" class="empty-state">
-                            <i class="fas fa-radar"></i>
+                            <i class="fas fa-satellite-dish"></i>
                             <p>Scanning markets for institutional setups...</p>
+                        </div>
+                    </div>
+                    <div id="radarDetailsModal" class="modal radar-details-modal">
+                        <div class="modal-content radar-details-modal-content">
+                            <span class="close">&times;</span>
+                            <div id="radarDetailsModalBody"></div>
                         </div>
                     </div>
                 </section>
@@ -1955,3 +1962,4 @@
     <script src="{{ url_for('static', filename='js/app.js') }}?v={{ app_js_version }}"></script>
 </body>
 </html>
+

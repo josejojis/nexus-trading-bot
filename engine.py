@@ -44,6 +44,13 @@ class TradingEngine:
         self.timeframe = 5  # M5 timeframe
         self.volume = float(os.getenv("TRADE_VOLUME", 0.001))
         self.base_trade_volume = self.volume
+        self.min_trade_readiness_score = max(float(os.getenv("MIN_TRADE_READINESS_SCORE", 0.62)), 0.68)
+        self.execution_setup_score_threshold = max(float(os.getenv("EXECUTION_SETUP_SCORE_THRESHOLD", 0.50)), 0.62)
+        self.execution_conviction_threshold = max(float(os.getenv("EXECUTION_CONVICTION_THRESHOLD", 0.35)), 0.42)
+        self.market_execution_score_threshold = max(float(os.getenv("MARKET_EXECUTION_SCORE_THRESHOLD", 0.45)), 0.58)
+        self.market_execution_conviction_threshold = max(float(os.getenv("MARKET_EXECUTION_CONVICTION_THRESHOLD", 0.35)), 0.45)
+        self.min_expected_r = max(float(os.getenv("MIN_EXPECTED_R", 1.2)), 1.5)
+        self.min_professional_conviction = max(float(os.getenv("MIN_PROFESSIONAL_CONVICTION", 0.30)), 0.38)
         self.broker_min_lot_fallback_enabled = os.getenv("FEATURE_BROKER_MIN_LOT_FALLBACK", "true").lower() in ["true", "1", "yes"]
         self.max_auto_min_lot = float(os.getenv("MAX_AUTO_MIN_LOT", 0.01))
         self.dynamic_account_profile_enabled = os.getenv("FEATURE_DYNAMIC_ACCOUNT_PROFILE", "true").lower() in ["true", "1", "yes"]
@@ -108,11 +115,11 @@ class TradingEngine:
         self.daily_loss_cap_pct = float(os.getenv("DAILY_LOSS_CAP_PERCENT", 0.05))
         self.max_daily_losses = int(os.getenv("MAX_DAILY_LOSSES", 100))
         self.max_consecutive_losses = int(os.getenv("MAX_CONSECUTIVE_LOSSES", 30))
-        self.loss_cooldown_minutes = int(os.getenv("LOSS_COOLDOWN_MINUTES", 60))
+        self.loss_cooldown_minutes = int(os.getenv("LOSS_COOLDOWN_MINUTES", 3))
         self.max_active_trades_total = int(os.getenv("MAX_ACTIVE_TRADES_TOTAL", 10))
         self.catastrophic_loss_stop_enabled = os.getenv("FEATURE_CATASTROPHIC_LOSS_STOP", "true").lower() in ["true", "1", "yes"]
         self.catastrophic_loss_r = float(os.getenv("CATASTROPHIC_LOSS_R", 1.5))
-        self.catastrophic_loss_cooldown_minutes = int(os.getenv("CATASTROPHIC_LOSS_COOLDOWN_MINUTES", 360))
+        self.catastrophic_loss_cooldown_minutes = int(os.getenv("CATASTROPHIC_LOSS_COOLDOWN_MINUTES", 60))
         self.daily_loss_count = 0
         self.consecutive_loss_count = 0
         self.last_loss_brake_reason = None
@@ -151,9 +158,9 @@ class TradingEngine:
         self.armed_ttl_seconds = max(30, int(os.getenv("ARMED_CONFIRMATION_TTL_SECONDS", 180)))
         self.armed_min_score = float(os.getenv("ARMED_CONFIRMATION_MIN_SCORE", 0.58))
         self.armed_require_structure = os.getenv("ARMED_CONFIRMATION_REQUIRE_STRUCTURE", "true").lower() in ["true", "1", "yes"]
-        self.market_execution_score_threshold = float(os.getenv("MARKET_EXECUTION_SCORE_THRESHOLD", 0.45))
-        self.market_execution_conviction_threshold = float(os.getenv("MARKET_EXECUTION_CONVICTION_THRESHOLD", 0.35))
-        self.conviction_threshold = float(os.getenv("CONVICTION_THRESHOLD", 0.20))  # Balanced War Room threshold for valid early entries
+        self.market_execution_score_threshold = float(os.getenv("MARKET_EXECUTION_SCORE_THRESHOLD", 0.58))
+        self.market_execution_conviction_threshold = float(os.getenv("MARKET_EXECUTION_CONVICTION_THRESHOLD", 0.45))
+        self.conviction_threshold = float(os.getenv("CONVICTION_THRESHOLD", 0.38))  # Balanced War Room threshold for valid early entries
         self.trailing_stop_trigger_pct = float(os.getenv("TRAILING_STOP_TRIGGER_PCT", 0.55))  # Protect after 55% of TP reached
         self.trailing_stop_lock_pips = float(os.getenv("TRAILING_STOP_LOCK_PIPS", 10.0))
         self.trailing_stop_step_pct = float(os.getenv("TRAILING_STOP_STEP_PCT", 0.50))
@@ -165,15 +172,15 @@ class TradingEngine:
         self.partial_tp_extend_enabled = os.getenv("FEATURE_PARTIAL_TP_EXTEND", "true").lower() in ["true", "1", "yes"]
         self.partial_tp_extend_pct = float(os.getenv("PARTIAL_TP_EXTEND_PCT", self.trailing_tp_extension_pct))
         self.partial_tp_enabled = os.getenv("FEATURE_PARTIAL_TAKE_PROFIT", "true").lower() in ["true", "1", "yes"]
-        self.partial_tp_trigger_r = float(os.getenv("PARTIAL_TP_TRIGGER_R", 0.75))
+        self.partial_tp_trigger_r = float(os.getenv("PARTIAL_TP_TRIGGER_R", 0.65))
         self.partial_tp_close_pct = float(os.getenv("PARTIAL_TP_CLOSE_PCT", 0.5))
-        self.partial_tp_lock_pips = float(os.getenv("PARTIAL_TP_LOCK_PIPS", 10.0))
+        self.partial_tp_lock_pips = float(os.getenv("PARTIAL_TP_LOCK_PIPS", 12.0))
         self.breakeven_protection_enabled = os.getenv("FEATURE_BREAKEVEN_PROTECTION", "true").lower() in ["true", "1", "yes"]
-        self.breakeven_trigger_r = float(os.getenv("BREAKEVEN_TRIGGER_R", 0.30))
-        self.breakeven_lock_pips = float(os.getenv("BREAKEVEN_LOCK_PIPS", 0.0))
+        self.breakeven_trigger_r = float(os.getenv("BREAKEVEN_TRIGGER_R", 0.20))
+        self.breakeven_lock_pips = float(os.getenv("BREAKEVEN_LOCK_PIPS", 2.0))
         self.first_profit_breakeven_enabled = os.getenv("FEATURE_FIRST_PROFIT_BREAKEVEN", "true").lower() in ["true", "1", "yes"]
-        self.first_profit_breakeven_trigger_r = float(os.getenv("FIRST_PROFIT_BREAKEVEN_TRIGGER_R", 0.10))
-        self.first_profit_breakeven_trigger_r_scalp = float(os.getenv("FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP", 0.08))
+        self.first_profit_breakeven_trigger_r = float(os.getenv("FIRST_PROFIT_BREAKEVEN_TRIGGER_R", 0.05))
+        self.first_profit_breakeven_trigger_r_scalp = float(os.getenv("FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP", 0.03))
         self.reversal_breakeven_at_entry_enabled = os.getenv("FEATURE_REVERSAL_BREAKEVEN_AT_ENTRY", "true").lower() in ["true", "1", "yes"]
         self.reverse_profit_exit_enabled = os.getenv("FEATURE_REVERSE_PROFIT_EXIT", "true").lower() in ["true", "1", "yes"]
         self.reverse_profit_min_r = float(os.getenv("REVERSE_PROFIT_MIN_R", 1.20))
@@ -189,14 +196,14 @@ class TradingEngine:
         self.scalp_profile_enabled = os.getenv("ENABLE_SCALP_PROFILE", "true").lower() in ["true", "1", "yes"]
         self.intraday_profile_enabled = os.getenv("ENABLE_INTRADAY_PROFILE", "true").lower() in ["true", "1", "yes"]
         self.swing_profile_enabled = os.getenv("ENABLE_SWING_PROFILE", "true").lower() in ["true", "1", "yes"]
-        self.min_expected_r = float(os.getenv("MIN_EXPECTED_R", 1.2))
-        self.min_expected_r_scalp = float(os.getenv("MIN_EXPECTED_R_SCALP", 0.8))
+        self.min_expected_r = float(os.getenv("MIN_EXPECTED_R", 1.5))
+        self.min_expected_r_scalp = float(os.getenv("MIN_EXPECTED_R_SCALP", 1.0))
         self.take_profit_r_multiplier = float(os.getenv("TAKE_PROFIT_R_MULTIPLIER", 1.8))
         self.take_profit_r_multiplier_scalp = float(os.getenv("TAKE_PROFIT_R_MULTIPLIER_SCALP", 1.5))
         self.execution_conviction_threshold = float(os.getenv("EXECUTION_CONVICTION_THRESHOLD", 0.35))
-        self.execution_setup_score_threshold = float(os.getenv("EXECUTION_SETUP_SCORE_THRESHOLD", 0.50))
-        self.execution_archetype_score_threshold = float(os.getenv("EXECUTION_ARCHETYPE_SCORE_THRESHOLD", 0.58))
-        self.min_trade_readiness_score = float(os.getenv("MIN_TRADE_READINESS_SCORE", 0.62))
+        self.execution_setup_score_threshold = float(os.getenv("EXECUTION_SETUP_SCORE_THRESHOLD", 0.62))
+        self.execution_archetype_score_threshold = float(os.getenv("EXECUTION_ARCHETYPE_SCORE_THRESHOLD", 0.70))
+        self.min_trade_readiness_score = float(os.getenv("MIN_TRADE_READINESS_SCORE", 0.68))
         self.ict_mode_enabled = os.getenv("FEATURE_ICT_MODE", "false").lower() in ["true", "1", "yes"]
         self.ict_min_setup_score = float(os.getenv("ICT_MIN_SETUP_SCORE", 0.60))
         self.ict_min_confluence = float(os.getenv("ICT_MIN_CONFLUENCE", 0.60))
@@ -310,7 +317,7 @@ class TradingEngine:
             self.daily_loss_cap_pct = max(0.005, min(0.10, self.daily_loss_cap_pct))
             self.max_daily_losses = max(0, min(100, self.max_daily_losses))
             self.max_consecutive_losses = max(0, min(100, self.max_consecutive_losses))
-            self.loss_cooldown_minutes = max(30, self.loss_cooldown_minutes)
+            self.loss_cooldown_minutes = max(0, self.loss_cooldown_minutes)
             self.max_active_trades_total = max(1, min(20, self.max_active_trades_total))
             self.small_account_threshold = max(1.0, self.small_account_threshold)
             self.small_account_trade_volume = max(0.001, self.small_account_trade_volume)
@@ -320,7 +327,7 @@ class TradingEngine:
             self.small_account_max_exposure_pct = max(0.001, min(0.05, self.small_account_max_exposure_pct))
             self.small_account_max_active_trades = max(1, min(5, self.small_account_max_active_trades))
             self.catastrophic_loss_r = max(0.5, self.catastrophic_loss_r)
-            self.catastrophic_loss_cooldown_minutes = max(60, self.catastrophic_loss_cooldown_minutes)
+            self.catastrophic_loss_cooldown_minutes = max(0, self.catastrophic_loss_cooldown_minutes)
             self.reversal_shock_cooldown_minutes = max(1, self.reversal_shock_cooldown_minutes)
             self.reversal_shock_xau_cooldown_minutes = max(self.reversal_shock_cooldown_minutes, self.reversal_shock_xau_cooldown_minutes)
             self.opposing_signal_min_r = max(0.0, self.opposing_signal_min_r)
@@ -1182,21 +1189,17 @@ class TradingEngine:
         confluence = float(signal.get("confluence_score", 0.0))
         setup_score = float((signal.get("setup_score") or {}).get("score", 0.0))
 
-        if signal.get("early_entry") and setup_score >= self.early_entry_min_score:
+        if signal.get("early_entry") and setup_score >= self.early_entry_min_score and conviction >= self.market_execution_conviction_threshold:
             return True
-        if setup_score >= max(0.55, self.early_entry_min_score):
+        if setup_score >= max(0.68, self.early_entry_min_score):
             return True
-        if confluence >= 0.70:
+        if confluence >= 0.78:
             return True
-        if score >= self.market_execution_score_threshold:
+        if score >= self.market_execution_score_threshold and conviction >= self.market_execution_conviction_threshold:
             return True
-        if score >= self.market_execution_score_threshold + 0.10:
+        if conviction >= self.market_execution_conviction_threshold + 0.08 and score >= max(0.50, self.market_execution_score_threshold - 0.08):
             return True
-        if conviction >= self.market_execution_conviction_threshold and score >= max(0.45, self.market_execution_score_threshold - 0.10):
-            return True
-        if conviction >= self.market_execution_conviction_threshold + 0.10 and score >= 0.40:
-            return True
-        if confluence >= 0.55 and score >= 0.45:
+        if confluence >= 0.65 and score >= 0.52 and conviction >= 0.42:
             return True
         return False
 
@@ -1656,16 +1659,16 @@ class TradingEngine:
         setup_threshold = float(horizon_profile.get("setup_score_threshold", self.execution_setup_score_threshold))
         archetype_threshold = float(horizon_profile.get("archetype_score_threshold", self.execution_archetype_score_threshold))
 
-        if conviction >= conviction_threshold:
-            return True, f"{horizon_name} execution approved by {conviction_source} conviction {conviction:.3f}"
-        if setup_value >= setup_threshold:
-            return True, f"{horizon_name} execution approved by setup score {setup_value:.3f}"
-        if archetype and archetype != "Context Watch" and setup_value >= archetype_threshold:
+        if conviction >= conviction_threshold and setup_value >= setup_threshold:
+            return True, f"{horizon_name} execution approved by {conviction_source} conviction {conviction:.3f} and setup score {setup_value:.3f}"
+        if conviction >= conviction_threshold + 0.05 and setup_value >= max(0.60, setup_threshold - 0.02):
+            return True, f"{horizon_name} execution approved by strong conviction {conviction:.3f}"
+        if setup_value >= setup_threshold + 0.06 and conviction >= max(0.32, conviction_threshold - 0.06):
+            return True, f"{horizon_name} execution approved by high setup score {setup_value:.3f}"
+        if archetype and archetype != "Context Watch" and setup_value >= archetype_threshold and conviction >= max(0.35, conviction_threshold - 0.05):
             return True, f"{horizon_name} execution approved by {archetype} archetype ({setup_value:.3f})"
-        if horizon_name == "SCALP" and conviction >= max(0.25, conviction_threshold - 0.10):
+        if horizon_name == "SCALP" and conviction >= max(0.30, conviction_threshold - 0.08) and scalp_score >= 0.82:
             return True, f"SCALP execution approved by {conviction_source} conviction {conviction:.3f}"
-        if horizon_name == "SCALP" and scalp_score >= 0.78:
-            return True, f"SCALP execution approved by scalp score {scalp_score:.3f}"
 
         return False, (
             f"{horizon_name} execution gate failed: conviction={conviction:.3f}/{conviction_threshold:.3f}, "
@@ -4620,6 +4623,56 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Trailing take-profit error: {e}")
 
+    def _minutes_since_midnight(self, value: str | None) -> int:
+        if not value:
+            return 0
+        try:
+            hour, minute = map(int, str(value).split(":"))
+            return hour * 60 + minute
+        except Exception:
+            return 0
+
+    def _get_best_trading_window(self) -> dict:
+        """Return the session that is currently best for disciplined execution."""
+        now = datetime.now().astimezone().replace(tzinfo=None)
+        now_minutes = now.hour * 60 + now.minute
+        active_candidates = []
+        upcoming_candidates = []
+        for name, period in (self.sessions or {}).items():
+            start = self._minutes_since_midnight(period.get("start"))
+            end = self._minutes_since_midnight(period.get("end"))
+            if end < start:
+                end += 24 * 60
+                if now_minutes < start:
+                    now_minutes += 24 * 60
+            active = start <= now_minutes <= end
+            if active:
+                active_candidates.append((name, start, end, 0.95))
+            else:
+                if now_minutes < start:
+                    distance = start - now_minutes
+                else:
+                    distance = (24 * 60 - now_minutes) + start
+                score = max(0.25, 0.70 - min(0.40, distance / 720.0))
+                upcoming_candidates.append((name, start, end, round(score, 2)))
+
+        if active_candidates:
+            best_name, _, _, score = max(active_candidates, key=lambda item: item[3])
+            current_status = "open"
+            recommendation = "Trade selectively and protect profits on the first green R move"
+        else:
+            best_name, _, _, score = max(upcoming_candidates, key=lambda item: item[3])
+            current_status = "waiting"
+            recommendation = "Wait for the session overlap before taking fresh risk"
+
+        return {
+            "current_session": best_name,
+            "status": current_status,
+            "score": round(score, 2),
+            "recommendation": recommendation,
+            "window": self.sessions.get(best_name, {}),
+        }
+
     def get_status(self):
         """Get bot status"""
         try:
@@ -4693,6 +4746,7 @@ class TradingEngine:
                 "max_open_risk_pct": self.max_exposure_pct,
                 "open_risk_details": open_risk_details,
                 "loss_brake": loss_brake,
+                "best_trading_window": self._get_best_trading_window(),
                 "positions": positions,
                 "active_trades": len(self.active_trades),
                 "max_active_trades_total": self.max_active_trades_total,
@@ -4753,6 +4807,9 @@ class TradingEngine:
                     "partial_tp_trigger_r": self.partial_tp_trigger_r,
                     "partial_tp_close_pct": self.partial_tp_close_pct,
                     "partial_tp_lock_pips": self.partial_tp_lock_pips,
+                    "breakeven_protection_enabled": self.breakeven_protection_enabled,
+                    "breakeven_trigger_r": self.breakeven_trigger_r,
+                    "breakeven_lock_pips": self.breakeven_lock_pips,
                     "first_profit_breakeven": self.first_profit_breakeven_enabled,
                     "first_profit_breakeven_trigger_r": self.first_profit_breakeven_trigger_r,
                     "first_profit_breakeven_trigger_r_scalp": self.first_profit_breakeven_trigger_r_scalp,

@@ -13,6 +13,10 @@ class Bot {
         this.radarPageSize = 9;
         this.radarFilter = 'ALL';
         this.radarTrades = [];
+        this.radarSymbols = [];
+        this.radarSlots = [];
+        this.radarPositions = [];
+        this.selectedRadarSymbol = null;
         this.currentDecisionSignal = null;
         this.settingsNotificationTimer = null;
         this.init();
@@ -475,6 +479,18 @@ class Bot {
         const parsed = new Date(value);
         if (Number.isNaN(parsed.getTime())) return '--';
         return parsed.toLocaleTimeString();
+    }
+
+    renderBestTradingWindow(status = {}) {
+        const windowData = status.best_trading_window || status.trade_management?.best_trading_window || null;
+        if (!windowData) {
+            this.safeSetText('bestWindowState', '--');
+            return;
+        }
+        const score = Number(windowData.score || 0);
+        const session = windowData.current_session || 'Unknown';
+        const label = `${session} ${score >= 0.8 ? 'High' : score >= 0.55 ? 'Watch' : 'Wait'}`;
+        this.safeSetText('bestWindowState', label);
     }
 
     renderScanStatus(scan) {
@@ -992,6 +1008,7 @@ class Bot {
         const realtimeActiveTrades = Array.isArray(payload.positions) ? payload.positions.length : (status.active_trades || 0);
         this.safeSetText('activeTrades', realtimeActiveTrades);
         this.renderScanStatus(status.scan);
+        this.renderBestTradingWindow(status);
         const tm = status.trade_management || {};
         const lockPips = Number(tm.trailing_sl_lock_pips || 0);
         this.safeSetText('trailingSlState', tm.trailing_sl ? `On @ ${Math.round((tm.trailing_sl_trigger_pct || 0) * 100)}% / +${lockPips.toFixed(1)}p` : 'Off');
@@ -1366,6 +1383,7 @@ class Bot {
                 this.safeSetText('sizingMode', sizingMode.charAt(0).toUpperCase() + sizingMode.slice(1));
                 this.safeSetText('activeTrades', d.active_trades || 0);
                 this.renderScanStatus(d.scan);
+                this.renderBestTradingWindow(d);
                 const tm = d.trade_management || {};
                 const lockPips = Number(tm.trailing_sl_lock_pips || 0);
                 this.safeSetText('trailingSlState', tm.trailing_sl ? `On @ ${Math.round((tm.trailing_sl_trigger_pct || 0) * 100)}% / +${lockPips.toFixed(1)}p` : 'Off');
@@ -1923,7 +1941,7 @@ class Bot {
             return;
         }
         box.innerHTML = components.slice(0, 6).map((item) => `
-            <span class="setup-chip ${item.passed ? 'pass' : 'fail'}" title="${item.detail || ''}">
+            <span class="setup-chip ${item.passed ? 'pass' : 'fail'}" title="${this.escapeHtml(item.detail || '')}">
                 ${item.passed ? '✓' : '×'} ${item.label}
             </span>
         `).join('');
@@ -2878,17 +2896,41 @@ class Bot {
 
     async loadFutureTrades() {
         try {
-            const response = await fetch(`${this.apiBase}/logs`);
-            const data = await response.json();
-            
+            const [logsResponse, statusResponse, configResponse] = await Promise.all([
+                fetch(`${this.apiBase}/logs`),
+                fetch(`${this.apiBase}/bot/status`),
+                fetch(`${this.apiBase}/config`),
+            ]);
+            const data = await logsResponse.json();
+            const status = statusResponse.ok ? await statusResponse.json() : {};
+            const configPayload = configResponse.ok ? await configResponse.json() : {};
+            const config = configPayload.data || {};
+
             const grid = document.getElementById("globalRadarGrid");
             const emptyState = document.getElementById("globalRadarEmpty");
+            if (!grid || !emptyState) return;
             grid.innerHTML = "";
-            
+
             const futureTrades = (data.data && data.data.future_trades) ? data.data.future_trades : [];
+            const statusSymbols = Array.isArray(status.symbols) ? status.symbols : [];
+            const executionSymbols = status.scan?.execution_symbols || [];
+            const configuredSymbols = [
+                ...(String(config.TRADING_SYMBOLS || '').split(',')),
+                ...(String(config.EXECUTION_SYMBOLS || '').split(',')),
+            ];
+            this.radarSymbols = this.normalizeRadarSymbols([
+                ...statusSymbols,
+                ...executionSymbols,
+                ...configuredSymbols,
+                ...(this.symbols || []),
+                ...futureTrades.map((trade) => trade.symbol),
+            ]);
             this.radarTrades = futureTrades.slice().reverse();
+            this.radarPositions = Array.isArray(status.positions) ? status.positions : [];
+            this.radarSlots = this.buildRadarSlots(this.radarSymbols, this.radarTrades);
             this.renderRadarSummary(futureTrades);
             this.renderGlobalRadar();
+            // The old duplicate-card renderer below is intentionally bypassed by the pair watchlist renderer.
             return;
             
             if (futureTrades.length > 0) {
@@ -2988,9 +3030,13 @@ class Bot {
     }
 
     getRadarFilteredTrades() {
-        const trades = this.radarTrades || [];
-        if (this.radarFilter === 'ALL') return trades;
-        return trades.filter((trade) => (trade.trade_horizon?.type || 'INTRADAY') === this.radarFilter);
+        const slots = this.radarSlots || [];
+        if (this.radarFilter === 'ALL') return slots;
+        return slots.filter((slot) => {
+            const latest = slot.latest;
+            if (!latest) return false;
+            return (latest.trade_horizon?.type || 'INTRADAY') === this.radarFilter;
+        });
     }
 
     changeRadarPage(delta) {
@@ -3005,20 +3051,15 @@ class Bot {
         if (!grid || !emptyState) return;
 
         const filtered = this.getRadarFilteredTrades();
-        const totalPages = Math.max(1, Math.ceil(filtered.length / this.radarPageSize));
-        this.radarPage = Math.min(totalPages, Math.max(1, this.radarPage));
-        const start = (this.radarPage - 1) * this.radarPageSize;
-        const pageTrades = filtered.slice(start, start + this.radarPageSize);
-
         const pageInfo = document.getElementById('radarPageInfo');
-        if (pageInfo) pageInfo.textContent = `Page ${this.radarPage} / ${totalPages}`;
+        if (pageInfo) pageInfo.textContent = `${filtered.length} pairs`;
         const prev = document.getElementById('radarPrevBtn');
         const next = document.getElementById('radarNextBtn');
-        if (prev) prev.disabled = this.radarPage <= 1;
-        if (next) next.disabled = this.radarPage >= totalPages;
+        if (prev) prev.disabled = true;
+        if (next) next.disabled = true;
 
         grid.innerHTML = "";
-        if (!pageTrades.length) {
+        if (!filtered.length) {
             emptyState.style.display = "block";
             grid.style.display = "none";
             return;
@@ -3026,23 +3067,111 @@ class Bot {
 
         emptyState.style.display = "none";
         grid.style.display = "grid";
-        const topScore = Math.max(...filtered.map((trade) => this.getSignalQualityScore(trade)));
-        pageTrades.forEach((trade) => grid.appendChild(this.buildRadarCard(trade, topScore)));
+        const scored = filtered.map((slot) => slot.latest).filter(Boolean);
+        const topScore = scored.length ? Math.max(...scored.map((trade) => this.getSignalQualityScore(trade))) : 0;
+        filtered.forEach((slot) => grid.appendChild(this.buildRadarCard(slot, topScore)));
     }
 
-    buildRadarCard(trade, topScore = null) {
+    normalizeRadarSymbols(symbols = []) {
+        return Array.from(new Set(
+            symbols
+                .map((symbol) => String(symbol || '').trim().toUpperCase())
+                .filter(Boolean)
+        )).sort();
+    }
+
+    buildRadarSlots(symbols = [], trades = []) {
+        const allSymbols = this.normalizeRadarSymbols([
+            ...symbols,
+            ...trades.map((trade) => trade.symbol),
+        ]);
+        const slots = allSymbols.map((symbol) => ({symbol, latest: null, history: []}));
+        const bySymbol = new Map(slots.map((slot) => [slot.symbol, slot]));
+
+        trades.forEach((trade) => {
+            const symbol = String(trade.symbol || '').trim().toUpperCase();
+            if (!symbol) return;
+            if (!bySymbol.has(symbol)) {
+                const slot = {symbol, latest: null, history: []};
+                bySymbol.set(symbol, slot);
+                slots.push(slot);
+            }
+            const slot = bySymbol.get(symbol);
+            slot.history.push(trade);
+        });
+
+        slots.forEach((slot) => {
+            slot.latest = slot.history[0] || null;
+            slot.signal_count = slot.history.length;
+        });
+        return slots;
+    }
+
+    formatPrice(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? number.toFixed(5) : 'N/A';
+    }
+
+    getRadarPairState(slot = {}) {
+        const symbol = String(slot.symbol || '').trim().toUpperCase();
+        const latest = slot.latest;
+        const hasOpenPosition = (this.radarPositions || []).some((position) =>
+            String(position.symbol || '').trim().toUpperCase() === symbol
+        );
+        if (hasOpenPosition) {
+            return {label: 'Trade Active', tone: 'active', reason: 'Open position detected'};
+        }
+        if (!latest) {
+            return {label: 'No Setup', tone: 'idle', reason: 'No qualified signal yet'};
+        }
+
+        const spread = latest.spread_safety || latest.setup_score?.spread || {};
+        const falseMove = latest.false_move || latest.setup_score?.false_move || {};
+        const newsMove = latest.news_move || latest.setup_score?.news_move || {};
+        const text = [
+            latest.status,
+            latest.phase,
+            latest.action_needed,
+            latest.trigger,
+            latest.rejection_reason,
+            latest.reason,
+        ].filter(Boolean).join(' ').toLowerCase();
+        const blockedBySafety = spread.safe === false || falseMove.safe === false || newsMove.safe === false;
+        const blockedByText = ['blocked', 'reject', 'invalid', 'unsafe', 'spread too high', 'news'].some((word) => text.includes(word));
+        if (blockedBySafety || blockedByText) {
+            const reason = spread.safe === false
+                ? (spread.description || 'Spread unsafe')
+                : newsMove.safe === false
+                    ? (newsMove.description || 'News risk')
+                    : falseMove.safe === false
+                        ? (falseMove.description || 'False move risk')
+                        : (latest.rejection_reason || latest.action_needed || 'Risk filter blocked entry');
+            return {label: 'Blocked', tone: 'blocked', reason};
+        }
+
+        if (this.isExecutableSignal(latest)) {
+            return {label: 'Ready', tone: 'ready', reason: latest.action_needed || 'Executable signal'};
+        }
+        return {label: 'Watching', tone: 'watching', reason: latest.trigger || latest.action_needed || 'Waiting for confirmation'};
+    }
+
+    buildRadarCard(slot, topScore = null) {
         const card = document.createElement("div");
-        const best = this.isBestSignal(trade, topScore);
-        card.className = `watchlist-card${best ? ' best-signal-card' : ''}`;
+        const trade = slot.latest || {};
+        const hasSignal = Boolean(slot.latest);
+        const best = hasSignal && this.isBestSignal(trade, topScore);
+        const selected = this.selectedRadarSymbol === slot.symbol;
+        const pairState = this.getRadarPairState(slot);
+        card.className = `watchlist-card radar-symbol-card state-${pairState.tone}${best ? ' best-signal-card' : ''}${selected ? ' selected' : ''}${hasSignal ? '' : ' idle'}`;
         card.style.cursor = 'pointer';
 
-        const convictionScore = trade.conviction_score || 0;
-        const phase = trade.phase || "Monitoring";
-        const actionNeeded = trade.action_needed || "Waiting";
-        const trigger = trade.trigger || "Awaiting confirmation";
+        const convictionScore = hasSignal ? (trade.conviction_score || 0) : 0;
+        const phase = hasSignal ? (trade.phase || "Monitoring") : "No setup";
+        const actionNeeded = hasSignal ? (trade.action_needed || "Waiting") : "Waiting for first qualified signal";
+        const trigger = hasSignal ? (trade.trigger || "Awaiting confirmation") : "No active radar signal";
         const setupScore = trade.setup_score?.score || trade.confluence_score || 0;
         const setupGrade = trade.setup_score?.grade || '-';
-        const archetype = trade.setup_score?.archetype || trade.setup_name || 'Setup';
+        const archetype = hasSignal ? (trade.setup_score?.archetype || trade.setup_name || 'Setup') : 'Standing by';
         const horizon = trade.trade_horizon || {type: 'INTRADAY', hold_time: '30 min-4h', confidence: 0, reason: 'default management'};
         const components = trade.setup_score?.components || [];
         const passedComponents = components.filter((item) => item.passed).length;
@@ -3060,7 +3189,7 @@ class Bot {
             ? newsMove.mode.replaceAll('_', ' ')
             : 'Normal';
         const componentChips = components.slice(0, 4).map((item) => `
-            <span class="setup-chip ${item.passed ? 'pass' : 'fail'}" title="${item.detail || ''}">
+            <span class="setup-chip ${item.passed ? 'pass' : 'fail'}" title="${this.escapeHtml(item.detail || '')}">
                 ${item.passed ? '✓' : '×'} ${item.label}
             </span>
         `).join('');
@@ -3072,23 +3201,27 @@ class Bot {
 
         card.innerHTML = `
             <div class="watchlist-card-header">
-                <div class="watchlist-card-symbol">${trade.symbol} ${best ? this.getBestSignalBadge({...trade, best_signal: true}) : ''}</div>
-                <div class="watchlist-badge" style="background: ${statusColor}">${phase}</div>
+                <div class="watchlist-card-symbol">${this.escapeHtml(slot.symbol)} ${best ? this.getBestSignalBadge({...trade, best_signal: true}) : ''}</div>
+                <div class="watchlist-badge" style="background: ${statusColor}">${this.escapeHtml(phase)}</div>
             </div>
             <div class="watchlist-card-body">
-                <div class="radar-horizon-row">
-                    <span class="horizon-badge horizon-${String(horizon.type).toLowerCase()}">${horizon.type}</span>
-                    <small>${horizon.hold_time || ''}</small>
+                <div class="radar-state-row">
+                    <span class="radar-state-badge state-${pairState.tone}">${this.escapeHtml(pairState.label)}</span>
+                    <small>${this.escapeHtml(pairState.reason)}</small>
                 </div>
-                <div class="watchlist-card-type">${trade.type || trade.nature || 'Signal'}</div>
-                <div class="watchlist-card-setup">${archetype}</div>
+                <div class="radar-horizon-row">
+                    <span class="horizon-badge horizon-${String(horizon.type).toLowerCase()}">${hasSignal ? this.escapeHtml(horizon.type) : 'IDLE'}</span>
+                    <small>${hasSignal ? this.escapeHtml(horizon.hold_time || '') : 'Permanent pair card'}</small>
+                </div>
+                <div class="watchlist-card-type">${hasSignal ? this.escapeHtml(trade.type || trade.nature || 'Signal') : 'No duplicate stream'}</div>
+                <div class="watchlist-card-setup">${this.escapeHtml(archetype)}</div>
                 <div class="watchlist-card-conviction">
                     <div class="conviction-bar">
                         <div class="conviction-fill" style="width: ${convictionScore}%"></div>
                     </div>
-                    <span>${convictionScore}% Conviction</span>
+                    <span>${convictionScore}% Conviction | ${slot.signal_count || 0} recent signal(s)</span>
                 </div>
-                <div class="watchlist-card-zone">Zone: ${trade.entry ? trade.entry.toFixed(5) : 'N/A'}</div>
+                <div class="watchlist-card-zone">Zone: ${this.formatPrice(trade.entry)}</div>
                 <div class="watchlist-card-zone">Early Score: ${(setupScore * 100).toFixed(0)}% | Grade ${setupGrade}</div>
                 <div class="radar-micro-row">
                     <span>${this.escapeHtml(method.asset)} ${this.escapeHtml(method.horizon)}</span>
@@ -3103,26 +3236,104 @@ class Bot {
                     <span class="${newsMove.safe === false ? 'metric-loss' : 'metric-profit'}">News ${newsLabel}</span>
                 </div>
                 <div class="setup-checklist">${componentChips || '<span>No component detail</span>'}</div>
-                <div class="watchlist-card-trigger">${trigger}</div>
-                <div class="watchlist-card-action">${actionNeeded}</div>
+                <div class="radar-signal-history">
+                    ${slot.history.slice(0, 3).map((item) => `<span>${this.escapeHtml(item.setup_score?.grade || '-')} ${this.escapeHtml(item.setup_score?.archetype || item.nature || item.type || 'Signal')}</span>`).join('') || '<span>No recent signals</span>'}
+                </div>
+                <div class="watchlist-card-trigger">${this.escapeHtml(trigger)}</div>
+                <div class="watchlist-card-action">${this.escapeHtml(actionNeeded)}</div>
                 <div class="signal-card-actions">
                     <button class="btn-small btn-reset signal-details-btn" type="button">Details</button>
-                    ${this.buildExecuteButtonHtml(trade, 'radar-execute-btn')}
+                    ${hasSignal ? this.buildExecuteButtonHtml(trade, 'radar-execute-btn') : ''}
                 </div>
             </div>
         `;
 
-        const signalDetails = {...trade, conviction: trade.conviction_score || 0};
+        const signalDetails = hasSignal ? {...trade, conviction: trade.conviction_score || 0} : null;
         card.querySelector('.signal-details-btn')?.addEventListener('click', (event) => {
             event.stopPropagation();
-            this.showSignalDetails(signalDetails);
+            this.showRadarDetails(slot);
         });
         card.querySelector('.signal-execute-btn')?.addEventListener('click', (event) => {
             event.stopPropagation();
             this.executeSignal(signalDetails, null, 'payload');
         });
-        card.addEventListener('click', () => this.showSignalDetails(signalDetails));
+        card.addEventListener('click', () => this.showRadarDetails(slot));
         return card;
+    }
+
+    showRadarDetails(slot) {
+        const modal = document.getElementById('radarDetailsModal');
+        const panel = document.getElementById('radarDetailsModalBody');
+        if (!modal || !panel) return;
+        this.selectedRadarSymbol = slot.symbol;
+        document.querySelectorAll('.radar-symbol-card').forEach((card) => card.classList.remove('selected'));
+        const latest = slot.latest;
+        const pairState = this.getRadarPairState(slot);
+        if (!latest) {
+            panel.innerHTML = `
+                <div class="radar-details-header">
+                    <strong>${this.escapeHtml(slot.symbol)}</strong>
+                    <span class="radar-state-badge state-${pairState.tone}">${this.escapeHtml(pairState.label)}</span>
+                </div>
+                <div class="radar-details-empty">
+                    <strong>Standing by</strong>
+                    <span>${this.escapeHtml(pairState.reason)}. New signals will update the card instead of adding duplicates.</span>
+                </div>
+            `;
+            modal.style.display = 'block';
+            this.renderGlobalRadar();
+            return;
+        }
+
+        const fields = [
+            ['Direction', latest.action || latest.type || 'N/A'],
+            ['Entry', this.formatPrice(latest.entry)],
+            ['SL', this.formatPrice(latest.sl)],
+            ['TP', this.formatPrice(latest.tp)],
+            ['Grade', latest.setup_score?.grade || 'N/A'],
+            ['Setup Score', latest.setup_score?.score != null ? latest.setup_score.score.toFixed(3) : 'N/A'],
+            ['Conviction', latest.conviction_score != null ? `${latest.conviction_score}%` : 'N/A'],
+            ['Horizon', latest.trade_horizon?.type || 'N/A'],
+            ['Spread', (latest.spread_safety || latest.setup_score?.spread)?.description || 'N/A'],
+            ['Status', pairState.label],
+        ];
+        const history = slot.history.slice(0, 8).map((item) => `
+            <li>
+                <strong>${this.escapeHtml(item.setup_score?.grade || '-')} ${this.escapeHtml(item.setup_score?.archetype || item.nature || item.type || 'Signal')}</strong>
+                <span>${this.escapeHtml(item.phase || item.status || 'Monitoring')} | ${this.formatPrice(item.entry)}</span>
+            </li>
+        `).join('');
+
+        panel.innerHTML = `
+            <div class="radar-details-header">
+                <strong>${this.escapeHtml(slot.symbol)}</strong>
+                <span class="radar-state-badge state-${pairState.tone}">${this.escapeHtml(pairState.label)}</span>
+            </div>
+            <div class="radar-details-reason">
+                <span>Current Pair State</span>
+                <strong>${this.escapeHtml(pairState.reason)}</strong>
+            </div>
+            <div class="radar-details-grid">
+                ${fields.map(([label, value]) => `<div><span>${this.escapeHtml(label)}</span><strong>${this.escapeHtml(value)}</strong></div>`).join('')}
+            </div>
+            <div class="radar-details-reason">
+                <span>Setup Summary</span>
+                <strong>${this.escapeHtml(latest.setup_score?.summary || latest.trigger || latest.action_needed || 'No summary available')}</strong>
+            </div>
+            <div class="radar-details-actions">
+                ${this.buildExecuteButtonHtml(latest, 'radar-inline-execute-btn')}
+            </div>
+            <div class="radar-details-history">
+                <h4>Recent Signal History</h4>
+                <ul>${history}</ul>
+            </div>
+        `;
+        panel.querySelector('.signal-execute-btn')?.addEventListener('click', (event) => {
+            event.stopPropagation();
+            this.executeSignal({...latest, conviction: latest.conviction_score || 0}, null, 'payload');
+        });
+        modal.style.display = 'block';
+        this.renderGlobalRadar();
     }
 
     renderRadarSummary(trades = []) {

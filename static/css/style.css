@@ -6804,3 +6804,623 @@ textarea:focus,
     border-radius: 999px;
     border: 2px solid rgba(7, 11, 18, 0.9);
 }
+
+/* Beautify pass: authoritative layout and polish overrides. */
+:root {
+    --beauty-bg: #05080d;
+    --beauty-surface: rgba(10, 16, 24, 0.94);
+    --beauty-surface-strong: rgba(15, 23, 34, 0.98);
+    --beauty-line: rgba(148, 163, 184, 0.18);
+    --beauty-line-strong: rgba(45, 212, 191, 0.34);
+    --beauty-text-soft: #aab9cc;
+}
+
+body {
+    min-width: 320px;
+    background:
+        linear-gradient(180deg, rgba(45, 212, 191, 0.055), transparent 28rem),
+        linear-gradient(135deg, rgba(96, 165, 250, 0.045), transparent 32rem),
+        var(--beauty-bg) !important;
+}
+
+.app-shell {
+    display: grid !important;
+    grid-template-columns: 17.5rem minmax(0, 1fr) !important;
+    align-items: stretch !important;
+    width: 100%;
+}
+
+.platform-sidebar {
+    grid-column: 1 !important;
+    width: 17.5rem !important;
+    min-width: 17.5rem !important;
+    max-width: 17.5rem !important;
+    padding: 1rem !important;
+    gap: 1rem !important;
+    align-items: stretch !important;
+    overflow: hidden auto !important;
+}
+
+.platform-sidebar .logo {
+    width: 100%;
+}
+
+.platform-sidebar .brand-copy,
+.platform-sidebar .sidebar-section-label,
+.platform-sidebar .sidebar-risk-card,
+.platform-sidebar .sidebar-footer span:not(.connection-dot) {
+    display: block !important;
+}
+
+.platform-sidebar nav {
+    width: 100%;
+    gap: 0.45rem !important;
+}
+
+.platform-sidebar .nav-link {
+    width: 100%;
+    justify-content: flex-start !important;
+    padding: 0.72rem 0.85rem !important;
+    font-size: 0.9rem;
+}
+
+.platform-sidebar .nav-link::after {
+    display: none !important;
+}
+
+.platform-main {
+    grid-column: 2 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    padding: 1rem !important;
+}
+
+.platform-topbar {
+    display: grid !important;
+    grid-template-columns: minmax(18rem, 1fr) auto auto;
+    align-items: center;
+    gap: 1rem;
+    min-height: 5.25rem;
+    padding: 1rem 1.15rem !important;
+    margin-bottom: 1rem !important;
+    border-radius: 10px !important;
+}
+
+.platform-topbar p,
+.eyebrow {
+    display: block !important;
+}
+
+.topbar-title-row {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    flex-wrap: wrap;
+}
+
+.market-toolbar {
+    margin-left: 0 !important;
+}
+
+.header-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.6rem;
+}
+
+.header-actions .btn {
+    min-width: 5.8rem;
+    justify-content: center;
+}
+
+.content {
+    padding: 0 !important;
+    max-width: 100%;
+}
+
+.command-strip {
+    border-radius: 10px !important;
+    padding: 0.72rem 0.85rem !important;
+}
+
+.dashboard-layout {
+    gap: 0.9rem !important;
+}
+
+.dashboard-panel,
+.glass-card.panel,
+.ops-panel,
+.settings-container,
+.settings-section,
+.modal-content {
+    border-radius: 10px !important;
+}
+
+.dashboard-panel {
+    position: relative;
+    overflow: hidden;
+}
+
+.dashboard-panel::before,
+.glass-card.panel::before,
+.ops-panel::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(45, 212, 191, 0.55), transparent);
+    pointer-events: none;
+}
+
+.dashboard-panel-title,
+.panel-header h3 {
+    letter-spacing: 0;
+    font-size: 0.8rem !important;
+}
+
+.dashboard-panel .status-pill {
+    min-height: 3.1rem !important;
+    padding: 0.52rem 0.62rem !important;
+    border-radius: 8px !important;
+    font-size: 0.68rem !important;
+}
+
+.dashboard-panel .status-pill strong {
+    margin-top: 0.16rem;
+    font-size: 0.88rem !important;
+}
+
+.bot-group {
+    grid-template-columns: repeat(auto-fit, minmax(8.6rem, 1fr)) !important;
+}
+
+.account-group {
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)) !important;
+}
+
+.decision-hero,
+.decision-meta-grid > div,
+.decision-score,
+.decision-levels > div,
+.strategy-breakdown-card,
+.watchlist-card,
+.spread-safety-row,
+.rejection-summary-row {
+    border-radius: 9px !important;
+}
+
+.decision-hero {
+    padding: 1rem !important;
+}
+
+.decision-hero h4 {
+    font-size: clamp(1.25rem, 1.7vw, 1.65rem);
+}
+
+.decision-meta-grid,
+.decision-stack,
+.decision-levels {
+    gap: 0.55rem !important;
+}
+
+.btn,
+.btn-small,
+.icon-action,
+.settings-tab,
+.tab-btn,
+input,
+select,
+textarea {
+    border-radius: 8px !important;
+}
+
+.btn,
+.btn-small,
+.settings-tab,
+.tab-btn {
+    min-height: 2.35rem;
+}
+
+table,
+.signals-table {
+    border: 1px solid var(--beauty-line);
+}
+
+th,
+td {
+    padding-top: 0.62rem !important;
+    padding-bottom: 0.62rem !important;
+}
+
+.settings-header,
+.settings-tabbar,
+.settings-actions {
+    border-radius: 10px !important;
+}
+
+.settings-section {
+    padding: 1rem !important;
+}
+
+.settings-section .form-row {
+    gap: 0.8rem !important;
+}
+
+.modal-content {
+    max-height: min(88vh, 920px);
+}
+
+@media (max-width: 1180px) {
+    .app-shell {
+        grid-template-columns: 5.25rem minmax(0, 1fr) !important;
+    }
+
+    .platform-sidebar {
+        width: 5.25rem !important;
+        min-width: 5.25rem !important;
+        max-width: 5.25rem !important;
+        padding: 0.75rem 0.55rem !important;
+        align-items: center !important;
+    }
+
+    .platform-sidebar .brand-copy,
+    .platform-sidebar .sidebar-section-label,
+    .platform-sidebar .sidebar-risk-card,
+    .platform-sidebar .sidebar-footer span:not(.connection-dot),
+    .platform-sidebar .nav-link::after {
+        display: none !important;
+    }
+
+    .platform-sidebar .logo,
+    .platform-sidebar nav,
+    .platform-sidebar .nav-link {
+        width: 100%;
+    }
+
+    .platform-sidebar .logo {
+        justify-content: center;
+        padding: 0.65rem !important;
+    }
+
+    .platform-sidebar .nav-link {
+        justify-content: center !important;
+        padding: 0.75rem !important;
+    }
+
+    .platform-sidebar .nav-link i {
+        margin: 0 !important;
+    }
+
+    .platform-topbar {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+    }
+
+    .market-toolbar,
+    .header-actions {
+        justify-content: flex-start;
+        flex-wrap: wrap;
+    }
+}
+
+@media (max-width: 760px) {
+    .app-shell {
+        display: block !important;
+    }
+
+    .platform-sidebar {
+        position: sticky;
+        top: 0;
+        z-index: 30;
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: none !important;
+        height: auto !important;
+        flex-direction: row !important;
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
+        border-right: 0 !important;
+        border-bottom: 1px solid var(--beauty-line-strong) !important;
+    }
+
+    .platform-sidebar .logo {
+        width: auto !important;
+        min-width: 3.25rem;
+    }
+
+    .platform-sidebar nav {
+        display: flex;
+        flex-direction: row !important;
+        min-width: max-content;
+    }
+
+    .platform-main {
+        padding: 0.7rem !important;
+    }
+
+    .platform-topbar {
+        min-height: 0;
+        padding: 0.8rem !important;
+    }
+
+    .symbol-search {
+        min-width: 0 !important;
+        width: 100%;
+    }
+
+    .market-toolbar,
+    .header-actions,
+    .header-actions .btn {
+        width: 100%;
+    }
+
+    .decision-meta-grid,
+    .decision-stack,
+    .decision-levels,
+    .decision-blockers {
+        grid-template-columns: 1fr !important;
+    }
+}
+
+/* Global Radar pair watchlist */
+#future-trades > .card {
+    display: block;
+}
+
+#future-trades > .card > h3,
+#future-trades .radar-command-bar,
+#future-trades .radar-pagination,
+#future-trades .empty-state {
+    width: 100%;
+}
+
+#globalRadarGrid {
+    min-height: 0 !important;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)) !important;
+    width: 100%;
+}
+
+.radar-symbol-card {
+    position: relative;
+    min-height: 320px;
+    transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.radar-symbol-card:hover,
+.radar-symbol-card.selected {
+    border-color: rgba(45, 212, 191, 0.55) !important;
+    box-shadow: 0 16px 36px rgba(15, 23, 42, 0.24), 0 0 0 1px rgba(45, 212, 191, 0.12);
+    transform: translateY(-1px);
+}
+
+.radar-symbol-card.idle {
+    opacity: 0.78;
+}
+
+.radar-symbol-card.idle .conviction-fill {
+    background: rgba(148, 163, 184, 0.28) !important;
+}
+
+.radar-state-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.55rem;
+    margin-bottom: 0.6rem;
+}
+
+.radar-state-row small {
+    min-width: 0;
+    color: var(--platform-muted);
+    font-size: 0.72rem;
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
+.radar-state-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 1.55rem;
+    padding: 0.25rem 0.55rem;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 999px;
+    color: var(--platform-text);
+    font-size: 0.7rem;
+    font-weight: 800;
+    line-height: 1;
+    white-space: nowrap;
+    background: rgba(15, 23, 42, 0.5);
+}
+
+.radar-state-badge.state-ready {
+    color: #bbf7d0;
+    border-color: rgba(34, 197, 94, 0.45);
+    background: rgba(34, 197, 94, 0.14);
+}
+
+.radar-state-badge.state-watching {
+    color: #fde68a;
+    border-color: rgba(245, 158, 11, 0.45);
+    background: rgba(245, 158, 11, 0.14);
+}
+
+.radar-state-badge.state-blocked {
+    color: #fecaca;
+    border-color: rgba(239, 68, 68, 0.45);
+    background: rgba(239, 68, 68, 0.14);
+}
+
+.radar-state-badge.state-active {
+    color: #bfdbfe;
+    border-color: rgba(59, 130, 246, 0.45);
+    background: rgba(59, 130, 246, 0.14);
+}
+
+.radar-state-badge.state-idle {
+    color: #cbd5e1;
+    border-color: rgba(148, 163, 184, 0.28);
+    background: rgba(148, 163, 184, 0.1);
+}
+
+.radar-symbol-card.state-ready {
+    border-color: rgba(34, 197, 94, 0.32) !important;
+}
+
+.radar-symbol-card.state-blocked {
+    border-color: rgba(239, 68, 68, 0.25) !important;
+}
+
+.radar-symbol-card.state-active {
+    border-color: rgba(59, 130, 246, 0.32) !important;
+}
+
+.radar-signal-history {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.6rem;
+}
+
+.radar-signal-history span {
+    padding: 0.24rem 0.45rem;
+    border: 1px solid rgba(148, 163, 184, 0.18);
+    border-radius: 7px;
+    color: var(--platform-muted);
+    font-size: 0.72rem;
+    background: rgba(15, 23, 42, 0.28);
+}
+
+.radar-details-modal {
+    padding: 0;
+}
+
+.radar-details-modal-content {
+    width: calc(100vw - 2rem) !important;
+    max-width: none !important;
+    height: calc(100vh - 2rem);
+    max-height: calc(100vh - 2rem);
+    margin: 1rem auto !important;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 1.1rem;
+    border: 1px solid var(--beauty-line);
+    border-radius: 9px;
+    background: rgba(8, 13, 24, 0.78);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    scrollbar-width: thin;
+    scrollbar-color: rgba(45, 212, 191, 0.45) rgba(15, 23, 42, 0.45);
+}
+
+.radar-details-modal-content::-webkit-scrollbar {
+    width: 8px;
+}
+
+.radar-details-modal-content::-webkit-scrollbar-track {
+    background: rgba(15, 23, 42, 0.45);
+    border-radius: 999px;
+}
+
+.radar-details-modal-content::-webkit-scrollbar-thumb {
+    background: rgba(45, 212, 191, 0.45);
+    border-radius: 999px;
+}
+
+.radar-details-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    align-items: center;
+    margin-bottom: 0.85rem;
+}
+
+.radar-details-header strong {
+    color: var(--platform-text);
+    font-size: 1rem;
+}
+
+.radar-details-header span,
+.radar-details-empty span,
+.radar-details-reason span {
+    color: var(--platform-muted);
+    font-size: 0.78rem;
+}
+
+.radar-details-empty {
+    display: grid;
+    gap: 0.35rem;
+    min-height: 180px;
+    align-content: center;
+    text-align: center;
+}
+
+.radar-details-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
+}
+
+.radar-details-grid > div,
+.radar-details-reason {
+    padding: 0.65rem;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.34);
+}
+
+.radar-details-grid span,
+.radar-details-reason span {
+    display: block;
+    margin-bottom: 0.22rem;
+}
+
+.radar-details-grid strong,
+.radar-details-reason strong {
+    color: var(--platform-text);
+    font-size: 0.85rem;
+    overflow-wrap: anywhere;
+}
+
+.radar-details-reason,
+.radar-details-actions,
+.radar-details-history {
+    margin-top: 0.8rem;
+}
+
+.radar-details-history h4 {
+    margin: 0 0 0.5rem;
+    font-size: 0.82rem;
+    color: var(--platform-text);
+}
+
+.radar-details-history ul {
+    display: grid;
+    gap: 0.45rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.radar-details-history li {
+    display: grid;
+    gap: 0.15rem;
+    padding: 0.55rem;
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    border-radius: 8px;
+    background: rgba(2, 6, 23, 0.28);
+}
+
+.radar-details-history li span {
+    color: var(--platform-muted);
+    font-size: 0.76rem;
+}
+
+@media (max-width: 1100px) {
+    .radar-details-modal-content {
+        width: calc(100vw - 1rem) !important;
+        height: calc(100vh - 1rem);
+        max-height: calc(100vh - 1rem);
+        margin: 0.5rem auto !important;
+    }
+}

@@ -404,6 +404,7 @@ def api_status():
                 "equity": status.get("equity"),
                 "free_margin": status.get("free_margin"),
                 "margin_level": status.get("margin_level"),
+                "best_trading_window": status.get("best_trading_window"),
                 "daily_profit": status.get("daily_profit"),
                 "floating_profit": status.get("floating_profit"),
                 "realized_profit": status.get("realized_profit"),

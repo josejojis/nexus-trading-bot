@@ -181,7 +181,7 @@ class TradingEngine:
         self.reverse_profit_close_pct = float(os.getenv("REVERSE_PROFIT_CLOSE_PCT", 0.5))
         self.reverse_after_partial_lock_r = float(os.getenv("REVERSE_AFTER_PARTIAL_LOCK_R", 0.20))
         self.max_adverse_exit_enabled = os.getenv("FEATURE_MAX_ADVERSE_EXIT", "true").lower() in ["true", "1", "yes"]
-        self.max_adverse_r = float(os.getenv("MAX_ADVERSE_R", 0.60))
+        self.max_adverse_r = float(os.getenv("MAX_ADVERSE_R", 0.90))
         self.symbol_profiles_enabled = os.getenv("FEATURE_SYMBOL_PROFILES", "true").lower() in ["true", "1", "yes"]
         self.instrument_profiles_enabled = os.getenv("FEATURE_INSTRUMENT_PROFILES", "true").lower() in ["true", "1", "yes"]
         self.trade_horizon_profiles_enabled = os.getenv("FEATURE_TRADE_HORIZON_PROFILES", "true").lower() in ["true", "1", "yes"]
@@ -305,7 +305,7 @@ class TradingEngine:
             self.reverse_profit_min_r = max(0.1, self.reverse_profit_min_r)
             self.reverse_profit_giveback_pct = max(0.05, min(0.95, self.reverse_profit_giveback_pct))
             self.reverse_profit_close_pct = max(0.1, min(1.0, self.reverse_profit_close_pct))
-            self.max_adverse_r = max(0.1, min(1.0, self.max_adverse_r))
+            self.max_adverse_r = max(0.1, min(2.0, self.max_adverse_r))
             self.reverse_after_partial_lock_r = max(0.0, self.reverse_after_partial_lock_r)
             self.daily_loss_cap_pct = max(0.005, min(0.10, self.daily_loss_cap_pct))
             self.max_daily_losses = max(0, min(100, self.max_daily_losses))
@@ -510,7 +510,7 @@ class TradingEngine:
                 "market_conviction": 0.30,
                 "session_trade": 0.40,
                 "session_scalp": 0.55,
-                "cooldown": 3,
+                "cooldown": 0,
                 "daily_loss_cap_pct": 0.03,
                 "max_daily_losses": 1,
                 "max_consecutive_losses": 1,
@@ -531,7 +531,7 @@ class TradingEngine:
                 "market_conviction": 0.30,
                 "session_trade": 0.38,
                 "session_scalp": 0.52,
-                "cooldown": 3,
+                "cooldown": 0,
                 "daily_loss_cap_pct": 0.04,
                 "max_daily_losses": 1,
                 "max_consecutive_losses": 1,
@@ -552,7 +552,7 @@ class TradingEngine:
                 "market_conviction": 0.30,
                 "session_trade": 0.35,
                 "session_scalp": 0.45,
-                "cooldown": 3,
+                "cooldown": 0,
                 "daily_loss_cap_pct": 0.05,
                 "max_daily_losses": 2,
                 "max_consecutive_losses": 1,
@@ -573,7 +573,7 @@ class TradingEngine:
                 "market_conviction": 0.35,
                 "session_trade": 0.40,
                 "session_scalp": 0.55,
-                "cooldown": 3,
+                "cooldown": 0,
                 "daily_loss_cap_pct": 0.05,
                 "max_daily_losses": 2,
                 "max_consecutive_losses": 2,
@@ -596,7 +596,10 @@ class TradingEngine:
         self.market_execution_conviction_threshold = profile["market_conviction"]
         self.min_session_score_for_trade = profile["session_trade"]
         self.min_session_score_for_scalp = profile["session_scalp"]
-        self.trade_cooldown_minutes = profile["cooldown"]
+        try:
+            self.trade_cooldown_minutes = max(0, int(os.getenv("TRADE_COOLDOWN_MINUTES", profile["cooldown"])))
+        except Exception:
+            self.trade_cooldown_minutes = profile["cooldown"]
         self.daily_loss_cap_pct = profile["daily_loss_cap_pct"]
         try:
             self.max_daily_losses = max(0, min(100, int(os.getenv("MAX_DAILY_LOSSES", profile["max_daily_losses"]))))
@@ -2371,6 +2374,7 @@ class TradingEngine:
             "reverse_profit_giveback_pct": getattr(self, "reverse_profit_giveback_pct", 0.45),
             "reverse_profit_close_pct": getattr(self, "reverse_profit_close_pct", 0.5),
             "reverse_after_partial_lock_r": getattr(self, "reverse_after_partial_lock_r", 0.20),
+            "max_adverse_r": getattr(self, "max_adverse_r", 0.60),
         }
 
     def _symbol_profile_overrides(self) -> dict:
@@ -2428,7 +2432,7 @@ class TradingEngine:
                 "partial_tp_trigger_r": self._env_float("PARTIAL_TP_TRIGGER_R_FOREX", 0.70),
                 "trailing_stop_trigger_pct": self._env_float("TRAILING_STOP_TRIGGER_PCT_FOREX", 0.55),
                 "trailing_stop_step_pct": self._env_float("TRAILING_STOP_STEP_PCT_FOREX", 0.50),
-                "max_adverse_r": self._env_float("MAX_ADVERSE_R_FOREX", 0.45),
+                "max_adverse_r": self._env_float("MAX_ADVERSE_R_FOREX", 0.85),
             },
             "METAL": {
                 "name": "METAL",
@@ -2438,7 +2442,7 @@ class TradingEngine:
                 "trailing_stop_min_step_pips": self._env_float("TRAILING_STOP_MIN_STEP_PIPS_METAL", 10.0),
                 "reverse_profit_min_r": self._env_float("REVERSE_PROFIT_MIN_R_METAL", 1.50),
                 "reverse_profit_giveback_pct": self._env_float("REVERSE_PROFIT_GIVEBACK_PCT_METAL", 0.50),
-                "max_adverse_r": self._env_float("MAX_ADVERSE_R_METAL", 0.60),
+                "max_adverse_r": self._env_float("MAX_ADVERSE_R_METAL", 0.90),
             },
             "STOCK": {
                 "name": "STOCK",
@@ -2522,7 +2526,7 @@ class TradingEngine:
                 "trailing_stop_trigger_pct": 0.50,
                 "trailing_stop_step_pct": 0.45,
                 "trailing_stop_min_step_pips": 3.0,
-                "max_adverse_r": 0.45,
+                "max_adverse_r": self._env_float("MAX_ADVERSE_R_SCALP", 0.85),
                 "allow_news_ladder": False,
             },
             "INTRADAY": {
@@ -2533,7 +2537,7 @@ class TradingEngine:
                 "trailing_stop_trigger_pct": 0.55,
                 "trailing_stop_step_pct": 0.50,
                 "trailing_stop_min_step_pips": 5.0,
-                "max_adverse_r": 0.60,
+                "max_adverse_r": self._env_float("MAX_ADVERSE_R_INTRADAY", 0.90),
                 "allow_news_ladder": True,
             },
             "SWING": {
@@ -2545,7 +2549,7 @@ class TradingEngine:
                 "trailing_stop_trigger_pct": 0.70,
                 "trailing_stop_step_pct": 0.70,
                 "trailing_stop_min_step_pips": 8.0,
-                "max_adverse_r": 0.80,
+                "max_adverse_r": self._env_float("MAX_ADVERSE_R_SWING", 1.10),
                 "allow_news_ladder": False,
             },
         }

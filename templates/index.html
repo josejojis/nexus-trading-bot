@@ -410,7 +410,7 @@
                                 </div>
                                 <div class="form-group">
                                     <label for="trailingTpTriggerPct">Trailing TP Trigger (%)</label>
-                                    <input type="number" id="trailingTpTriggerPct" min="1" max="100" step="1" placeholder="80">
+                                    <input type="number" id="trailingTpTriggerPct" min="1" max="100" step="1" placeholder="85">
                                 </div>
                                 <div class="form-group">
                                     <label for="trailingTpExtensionPct">Trailing TP Extension (%)</label>
@@ -434,7 +434,7 @@
                                 </div>
                                 <div class="form-group">
                                     <label for="tradeCooldownMinutes">Trade Cooldown (min)</label>
-                                    <input type="number" id="tradeCooldownMinutes" min="0" max="120" step="5" placeholder="3" value="3">
+                                    <input type="number" id="tradeCooldownMinutes" min="0" max="120" step="1" placeholder="0" value="0">
                                 </div>
                             </div>
                             <div class="settings-actions">
@@ -1206,7 +1206,7 @@
                                                 <i class="fas fa-bullseye"></i>
                                                 TP Extension Trigger (%)
                                             </label>
-                                            <input type="number" id="trailingTpTriggerPct" min="1" max="100" step="1" placeholder="80" value="80">
+                                            <input type="number" id="trailingTpTriggerPct" min="1" max="100" step="1" placeholder="85" value="85">
                                             <small>How close to TP price must get before extension</small>
                                         </div>
                                         <div class="form-group">
@@ -1360,7 +1360,7 @@
                                                 <i class="fas fa-arrow-trend-down"></i>
                                                 Max Adverse (R)
                                             </label>
-                                            <input type="number" id="maxAdverseR" min="0.1" max="1" step="0.05" placeholder="0.60" value="0.60">
+                                            <input type="number" id="maxAdverseR" min="0.1" max="2" step="0.05" placeholder="0.90" value="0.90">
                                             <small>Loss threshold before defensive close</small>
                                         </div>
                                     </div>
@@ -1454,7 +1454,7 @@
                                                 <i class="fas fa-clock"></i>
                                                 Trade Cooldown (Minutes)
                                             </label>
-                                            <input type="number" id="tradeCooldownMinutes" min="0" max="120" step="5" placeholder="3" value="3">
+                                            <input type="number" id="tradeCooldownMinutes" min="0" max="120" step="1" placeholder="0" value="0">
                                             <small>Wait time between trades on same symbol</small>
                                         </div>
                                         <div class="form-group">

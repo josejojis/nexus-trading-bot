@@ -453,7 +453,7 @@ def api_status():
                 "seconds_until_next_scan": None,
                 "last_signal_count": 0,
                 "duplicate_signal_cooldown_seconds": int(os.getenv("DUPLICATE_SIGNAL_COOLDOWN_SECONDS", 300)),
-                "trade_cooldown_minutes": int(os.getenv("TRADE_COOLDOWN_MINUTES", 1)),
+                "trade_cooldown_minutes": int(os.getenv("TRADE_COOLDOWN_MINUTES", 0)),
                 "max_trades_per_symbol": int(os.getenv("MAX_TRADES_PER_SYMBOL", 1)),
                 "early_entry_enabled": os.getenv("FEATURE_EARLY_ENTRY", "true").lower() in ["true", "1", "yes"],
                 "early_entry_min_score": float(os.getenv("EARLY_ENTRY_MIN_SCORE", 0.55)),
@@ -804,7 +804,12 @@ def api_config():
                 "FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP": getattr(engine, "first_profit_breakeven_trigger_r_scalp", as_float(os.getenv("FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP", "0.08"), 0.08)) if engine else as_float(os.getenv("FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP", "0.08"), 0.08),
                 "FEATURE_REVERSAL_BREAKEVEN_AT_ENTRY": engine.reversal_breakeven_at_entry_enabled if engine else os.getenv("FEATURE_REVERSAL_BREAKEVEN_AT_ENTRY", "true").lower() in ["1", "true", "yes"],
                 "FEATURE_MAX_ADVERSE_EXIT": engine.max_adverse_exit_enabled if engine else os.getenv("FEATURE_MAX_ADVERSE_EXIT", "true").lower() in ["1", "true", "yes"],
-                "MAX_ADVERSE_R": engine.max_adverse_r if engine else as_float(os.getenv("MAX_ADVERSE_R", "0.60"), 0.60),
+                "MAX_ADVERSE_R": engine.max_adverse_r if engine else as_float(os.getenv("MAX_ADVERSE_R", "0.90"), 0.90),
+                "MAX_ADVERSE_R_FOREX": os.getenv("MAX_ADVERSE_R_FOREX", "0.85"),
+                "MAX_ADVERSE_R_SCALP": os.getenv("MAX_ADVERSE_R_SCALP", "0.85"),
+                "MAX_ADVERSE_R_INTRADAY": os.getenv("MAX_ADVERSE_R_INTRADAY", "0.90"),
+                "MAX_ADVERSE_R_METAL": os.getenv("MAX_ADVERSE_R_METAL", "1.00"),
+                "MAX_ADVERSE_R_SWING": os.getenv("MAX_ADVERSE_R_SWING", "1.10"),
                 "FEATURE_REVERSE_PROFIT_EXIT": engine.reverse_profit_exit_enabled if engine else os.getenv("FEATURE_REVERSE_PROFIT_EXIT", "true").lower() in ["1", "true", "yes"],
                 "REVERSE_PROFIT_MIN_R": engine.reverse_profit_min_r if engine else as_float(os.getenv("REVERSE_PROFIT_MIN_R", "1.20"), 1.20),
                 "REVERSE_PROFIT_GIVEBACK_PCT": to_percent(engine.reverse_profit_giveback_pct if engine else os.getenv("REVERSE_PROFIT_GIVEBACK_PCT", "0.45"), 45),
@@ -844,7 +849,7 @@ def api_config():
                 "SWING_REQUIRE_HTF": os.getenv("SWING_REQUIRE_HTF", "true").lower() in ["1", "true", "yes"],
                 "SIGNAL_LOCKOUT_ENABLED": engine.signal_lockout_enabled if engine else os.getenv("SIGNAL_LOCKOUT_ENABLED", "true").lower() in ["1", "true", "yes"],
                 "MAX_TRADES_PER_SYMBOL": engine.max_trades_per_symbol if engine else int(os.getenv("MAX_TRADES_PER_SYMBOL", "1")),
-                "TRADE_COOLDOWN_MINUTES": engine.trade_cooldown_minutes if engine else int(os.getenv("TRADE_COOLDOWN_MINUTES", "3")),
+                "TRADE_COOLDOWN_MINUTES": engine.trade_cooldown_minutes if engine else int(os.getenv("TRADE_COOLDOWN_MINUTES", "0")),
                 "FEATURE_COOLDOWN_OVERRIDE": engine.cooldown_override_enabled if engine else os.getenv("FEATURE_COOLDOWN_OVERRIDE", "true").lower() in ["1", "true", "yes"],
                 "COOLDOWN_OVERRIDE_MIN_GRADE": engine.cooldown_override_min_grade if engine else os.getenv("COOLDOWN_OVERRIDE_MIN_GRADE", "A"),
                 "COOLDOWN_OVERRIDE_MIN_SCORE": engine.cooldown_override_min_score if engine else as_float(os.getenv("COOLDOWN_OVERRIDE_MIN_SCORE", "0.78"), 0.78),
@@ -968,7 +973,12 @@ def api_config():
         env_vars["FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP"] = str(data.get("FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP", env_vars.get("FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP", "0.08")))
         env_vars["FEATURE_REVERSAL_BREAKEVEN_AT_ENTRY"] = str(data.get("FEATURE_REVERSAL_BREAKEVEN_AT_ENTRY", env_vars.get("FEATURE_REVERSAL_BREAKEVEN_AT_ENTRY", "true"))).lower()
         env_vars["FEATURE_MAX_ADVERSE_EXIT"] = str(data.get("FEATURE_MAX_ADVERSE_EXIT", env_vars.get("FEATURE_MAX_ADVERSE_EXIT", "true"))).lower()
-        env_vars["MAX_ADVERSE_R"] = str(data.get("MAX_ADVERSE_R", env_vars.get("MAX_ADVERSE_R", "0.60")))
+        env_vars["MAX_ADVERSE_R"] = str(data.get("MAX_ADVERSE_R", env_vars.get("MAX_ADVERSE_R", "0.90")))
+        env_vars["MAX_ADVERSE_R_FOREX"] = str(data.get("MAX_ADVERSE_R_FOREX", env_vars.get("MAX_ADVERSE_R_FOREX", "0.85")))
+        env_vars["MAX_ADVERSE_R_SCALP"] = str(data.get("MAX_ADVERSE_R_SCALP", env_vars.get("MAX_ADVERSE_R_SCALP", "0.85")))
+        env_vars["MAX_ADVERSE_R_INTRADAY"] = str(data.get("MAX_ADVERSE_R_INTRADAY", env_vars.get("MAX_ADVERSE_R_INTRADAY", "0.90")))
+        env_vars["MAX_ADVERSE_R_METAL"] = str(data.get("MAX_ADVERSE_R_METAL", env_vars.get("MAX_ADVERSE_R_METAL", "1.00")))
+        env_vars["MAX_ADVERSE_R_SWING"] = str(data.get("MAX_ADVERSE_R_SWING", env_vars.get("MAX_ADVERSE_R_SWING", "1.10")))
         env_vars["FEATURE_REVERSE_PROFIT_EXIT"] = str(data.get("FEATURE_REVERSE_PROFIT_EXIT", env_vars.get("FEATURE_REVERSE_PROFIT_EXIT", "true"))).lower()
         env_vars["REVERSE_PROFIT_MIN_R"] = str(data.get("REVERSE_PROFIT_MIN_R", env_vars.get("REVERSE_PROFIT_MIN_R", "1.20")))
         env_vars["REVERSE_PROFIT_GIVEBACK_PCT"] = str(from_percent(data.get("REVERSE_PROFIT_GIVEBACK_PCT", env_vars.get("REVERSE_PROFIT_GIVEBACK_PCT", "0.45")), 0.45))
@@ -1031,7 +1041,7 @@ def api_config():
             env_vars[key] = str(value).lower() if key.endswith(("REQUIRE_HARD_STRUCTURE", "REQUIRE_HTF", "ALLOW_C_GRADE")) else str(value)
         env_vars["SIGNAL_LOCKOUT_ENABLED"] = str(data.get("SIGNAL_LOCKOUT_ENABLED", env_vars.get("SIGNAL_LOCKOUT_ENABLED", "true"))).lower()
         env_vars["MAX_TRADES_PER_SYMBOL"] = str(data.get("MAX_TRADES_PER_SYMBOL", env_vars.get("MAX_TRADES_PER_SYMBOL", "1")))
-        env_vars["TRADE_COOLDOWN_MINUTES"] = str(data.get("TRADE_COOLDOWN_MINUTES", env_vars.get("TRADE_COOLDOWN_MINUTES", "3")))
+        env_vars["TRADE_COOLDOWN_MINUTES"] = str(data.get("TRADE_COOLDOWN_MINUTES", env_vars.get("TRADE_COOLDOWN_MINUTES", "0")))
         env_vars["FEATURE_COOLDOWN_OVERRIDE"] = str(data.get("FEATURE_COOLDOWN_OVERRIDE", env_vars.get("FEATURE_COOLDOWN_OVERRIDE", "true"))).lower()
         env_vars["COOLDOWN_OVERRIDE_MIN_GRADE"] = str(data.get("COOLDOWN_OVERRIDE_MIN_GRADE", env_vars.get("COOLDOWN_OVERRIDE_MIN_GRADE", "A"))).upper()
         env_vars["COOLDOWN_OVERRIDE_MIN_SCORE"] = str(data.get("COOLDOWN_OVERRIDE_MIN_SCORE", env_vars.get("COOLDOWN_OVERRIDE_MIN_SCORE", "0.78")))
@@ -1350,7 +1360,7 @@ def api_config():
                 engine.max_adverse_exit_enabled = parse_bool(data["FEATURE_MAX_ADVERSE_EXIT"])
             if "MAX_ADVERSE_R" in data:
                 try:
-                    engine.max_adverse_r = max(0.1, min(1.0, float(data["MAX_ADVERSE_R"])))
+                    engine.max_adverse_r = max(0.1, min(2.0, float(data["MAX_ADVERSE_R"])))
                 except Exception:
                     pass
             if "FEATURE_REVERSE_PROFIT_EXIT" in data:
@@ -1679,7 +1689,12 @@ def api_config():
             f.write(f"FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP={env_vars.get('FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP', '0.08')}\n")
             f.write(f"FEATURE_REVERSAL_BREAKEVEN_AT_ENTRY={env_vars.get('FEATURE_REVERSAL_BREAKEVEN_AT_ENTRY', 'true')}\n")
             f.write(f"FEATURE_MAX_ADVERSE_EXIT={env_vars.get('FEATURE_MAX_ADVERSE_EXIT', 'true')}\n")
-            f.write(f"MAX_ADVERSE_R={env_vars.get('MAX_ADVERSE_R', '0.60')}\n")
+            f.write(f"MAX_ADVERSE_R={env_vars.get('MAX_ADVERSE_R', '0.90')}\n")
+            f.write(f"MAX_ADVERSE_R_FOREX={env_vars.get('MAX_ADVERSE_R_FOREX', '0.85')}\n")
+            f.write(f"MAX_ADVERSE_R_SCALP={env_vars.get('MAX_ADVERSE_R_SCALP', '0.85')}\n")
+            f.write(f"MAX_ADVERSE_R_INTRADAY={env_vars.get('MAX_ADVERSE_R_INTRADAY', '0.90')}\n")
+            f.write(f"MAX_ADVERSE_R_METAL={env_vars.get('MAX_ADVERSE_R_METAL', '1.00')}\n")
+            f.write(f"MAX_ADVERSE_R_SWING={env_vars.get('MAX_ADVERSE_R_SWING', '1.10')}\n")
             f.write(f"FEATURE_REVERSE_PROFIT_EXIT={env_vars.get('FEATURE_REVERSE_PROFIT_EXIT', 'true')}\n")
             f.write(f"REVERSE_PROFIT_MIN_R={env_vars.get('REVERSE_PROFIT_MIN_R', '1.20')}\n")
             f.write(f"REVERSE_PROFIT_GIVEBACK_PCT={env_vars.get('REVERSE_PROFIT_GIVEBACK_PCT', '0.45')}\n")
@@ -1693,7 +1708,7 @@ def api_config():
             f.write(f"ENABLE_SWING_PROFILE={env_vars.get('ENABLE_SWING_PROFILE', 'true')}\n")
             f.write(f"SIGNAL_LOCKOUT_ENABLED={env_vars.get('SIGNAL_LOCKOUT_ENABLED', 'true')}\n")
             f.write(f"MAX_TRADES_PER_SYMBOL={env_vars.get('MAX_TRADES_PER_SYMBOL', '1')}\n")
-            f.write(f"TRADE_COOLDOWN_MINUTES={env_vars.get('TRADE_COOLDOWN_MINUTES', '3')}\n")
+            f.write(f"TRADE_COOLDOWN_MINUTES={env_vars.get('TRADE_COOLDOWN_MINUTES', '0')}\n")
             f.write(f"FEATURE_COOLDOWN_OVERRIDE={env_vars.get('FEATURE_COOLDOWN_OVERRIDE', 'true')}\n")
             f.write(f"COOLDOWN_OVERRIDE_MIN_GRADE={env_vars.get('COOLDOWN_OVERRIDE_MIN_GRADE', 'A')}\n")
             f.write(f"COOLDOWN_OVERRIDE_MIN_SCORE={env_vars.get('COOLDOWN_OVERRIDE_MIN_SCORE', '0.78')}\n")

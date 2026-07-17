@@ -2436,7 +2436,7 @@ class Bot {
                 this.setAllInputs('trailingStopStepPct', cfg.TRAILING_STOP_STEP_PCT || '50');
                 this.setAllInputs('trailingStopMinStepPips', cfg.TRAILING_STOP_MIN_STEP_PIPS || '5');
                 this.setAllInputs('trailingTpEnabled', cfg.FEATURE_TRAILING_TAKE_PROFIT !== false);
-                this.setAllInputs('trailingTpTriggerPct', cfg.TRAILING_TP_TRIGGER_PCT || '80');
+                this.setAllInputs('trailingTpTriggerPct', cfg.TRAILING_TP_TRIGGER_PCT || '85');
                 this.setAllInputs('trailingTpExtensionPct', cfg.TRAILING_TP_EXTENSION_PCT || '50');
                 this.setAllInputs('trailingTpCooldownSeconds', cfg.TRAILING_TP_COOLDOWN_SECONDS || '300');
                 this.setAllInputs('partialTpExtendEnabled', cfg.FEATURE_PARTIAL_TP_EXTEND !== false);
@@ -2453,7 +2453,7 @@ class Bot {
                 this.setAllInputs('breakevenLockPips', cfg.BREAKEVEN_LOCK_PIPS || '0');
                 this.setAllInputs('reversalBreakevenAtEntryEnabled', cfg.FEATURE_REVERSAL_BREAKEVEN_AT_ENTRY !== false);
                 this.setAllInputs('maxAdverseExitEnabled', cfg.FEATURE_MAX_ADVERSE_EXIT !== false);
-                this.setAllInputs('maxAdverseR', cfg.MAX_ADVERSE_R || '0.60');
+                this.setAllInputs('maxAdverseR', cfg.MAX_ADVERSE_R || '0.90');
                 this.setAllInputs('reverseProfitExitEnabled', cfg.FEATURE_REVERSE_PROFIT_EXIT !== false);
                 this.setAllInputs('reverseProfitMinR', cfg.REVERSE_PROFIT_MIN_R || '1.20');
                 this.setAllInputs('reverseProfitGivebackPct', cfg.REVERSE_PROFIT_GIVEBACK_PCT || '45');
@@ -2464,7 +2464,7 @@ class Bot {
                 this.setAllInputs('signalLockoutEnabled', cfg.SIGNAL_LOCKOUT_ENABLED !== false);
                 this.setAllInputs('maxTradesPerSymbol', cfg.MAX_TRADES_PER_SYMBOL || '1');
                 this.setAllInputs('maxActiveTradesTotal', cfg.MAX_ACTIVE_TRADES_TOTAL || '10');
-                this.setAllInputs('tradeCooldownMinutes', cfg.TRADE_COOLDOWN_MINUTES || '15');
+                this.setAllInputs('tradeCooldownMinutes', cfg.TRADE_COOLDOWN_MINUTES ?? '0');
                 this.setAllInputs('noRevengeCooldown', cfg.NO_REVENGE_COOLDOWN_SECONDS ? cfg.NO_REVENGE_COOLDOWN_SECONDS / 3600 : '24');
                 this.setAllInputs('reversalShockGuardEnabled', cfg.FEATURE_REVERSAL_SHOCK_GUARD !== false);
                 this.setAllInputs('reversalShockCooldownMinutes', cfg.REVERSAL_SHOCK_COOLDOWN_MINUTES || '30');
@@ -2541,7 +2541,7 @@ class Bot {
                 TRADE_VOLUME: this.readNumber(form, 'volume', 0.001),
                 MAX_ACTIVE_TRADES_TOTAL: Math.round(this.readNumber(form, 'maxActiveTradesTotal', 10)),
                 MAX_TRADES_PER_SYMBOL: Math.round(this.readNumber(form, 'maxTradesPerSymbol', 1)),
-                TRADE_COOLDOWN_MINUTES: Math.round(this.readNumber(form, 'tradeCooldownMinutes', 3)),
+                TRADE_COOLDOWN_MINUTES: Math.round(this.readNumber(form, 'tradeCooldownMinutes', 0)),
                 SIGNAL_LOCKOUT_ENABLED: Boolean(this.readFormValue(form, 'signalLockoutEnabled', document.getElementById('signalLockoutEnabled')?.checked ?? true)),
                 FEATURE_DYNAMIC_ACCOUNT_PROFILE: Boolean(this.readFormValue(form, 'dynamicAccountProfileEnabled', document.getElementById('dynamicAccountProfileEnabled')?.checked ?? true)),
             },
@@ -2593,7 +2593,7 @@ class Bot {
                 FEATURE_PARTIAL_TP_EXTEND: Boolean(this.readFormValue(form, 'partialTpExtendEnabled', document.getElementById('partialTpExtendEnabled')?.checked ?? true)),
                 PARTIAL_TP_EXTEND_PCT: this.readPercentDecimal(form, 'partialTpExtendPct', 0.50),
                 FEATURE_TRAILING_TAKE_PROFIT: Boolean(this.readFormValue(form, 'trailingTpEnabled', document.getElementById('trailingTpEnabled')?.checked ?? true)),
-                TRAILING_TP_TRIGGER_PCT: this.readPercentDecimal(form, 'trailingTpTriggerPct', 0.80),
+                TRAILING_TP_TRIGGER_PCT: this.readPercentDecimal(form, 'trailingTpTriggerPct', 0.85),
                 TRAILING_TP_EXTENSION_PCT: this.readPercentDecimal(form, 'trailingTpExtensionPct', 0.50),
                 TRAILING_TP_COOLDOWN_SECONDS: Math.round(this.readNumber(form, 'trailingTpCooldownSeconds', 300)),
                 TRAILING_STOP_TRIGGER_PCT: this.readPercentDecimal(form, 'trailingStopTriggerPct', 0.55),
@@ -2626,7 +2626,7 @@ class Bot {
                 SMALL_ACCOUNT_DISABLE_NEWS_LADDER: Boolean(this.readFormValue(form, 'smallAccountDisableNewsLadder', document.getElementById('smallAccountDisableNewsLadder')?.checked ?? true)),
                 SMALL_ACCOUNT_DISABLE_PENDING_ORDERS: Boolean(this.readFormValue(form, 'smallAccountDisablePendingOrders', document.getElementById('smallAccountDisablePendingOrders')?.checked ?? true)),
                 FEATURE_MAX_ADVERSE_EXIT: Boolean(this.readFormValue(form, 'maxAdverseExitEnabled', document.getElementById('maxAdverseExitEnabled')?.checked ?? true)),
-                MAX_ADVERSE_R: this.readNumber(form, 'maxAdverseR', 0.60),
+                MAX_ADVERSE_R: this.readNumber(form, 'maxAdverseR', 0.90),
                 FEATURE_REVERSAL_SHOCK_GUARD: Boolean(this.readFormValue(form, 'reversalShockGuardEnabled', document.getElementById('reversalShockGuardEnabled')?.checked ?? true)),
                 REVERSAL_SHOCK_COOLDOWN_MINUTES: Math.round(this.readNumber(form, 'reversalShockCooldownMinutes', 30)),
                 REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES: Math.round(this.readNumber(form, 'reversalShockXauCooldownMinutes', 60)),
@@ -2728,7 +2728,7 @@ class Bot {
                 TRAILING_STOP_STEP_PCT: this.readPercentDecimal(form, 'trailingStopStepPct', 0.50),
                 TRAILING_STOP_MIN_STEP_PIPS: this.readNumber(form, 'trailingStopMinStepPips', 5),
                 FEATURE_TRAILING_TAKE_PROFIT: Boolean(this.readFormValue(form, 'trailingTpEnabled', document.getElementById('trailingTpEnabled')?.checked ?? true)),
-                TRAILING_TP_TRIGGER_PCT: this.readPercentDecimal(form, 'trailingTpTriggerPct', 0.80),
+                TRAILING_TP_TRIGGER_PCT: this.readPercentDecimal(form, 'trailingTpTriggerPct', 0.85),
                 TRAILING_TP_EXTENSION_PCT: this.readPercentDecimal(form, 'trailingTpExtensionPct', 0.50),
                 TRAILING_TP_COOLDOWN_SECONDS: Math.round(this.readNumber(form, 'trailingTpCooldownSeconds', 300)),
                 FEATURE_PARTIAL_TP_EXTEND: Boolean(this.readFormValue(form, 'partialTpExtendEnabled', document.getElementById('partialTpExtendEnabled')?.checked ?? true)),
@@ -2742,7 +2742,7 @@ class Bot {
                 FIRST_PROFIT_BREAKEVEN_TRIGGER_R: this.readNumber(form, 'firstProfitBreakevenTriggerR', 0.10),
                 FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP: this.readNumber(form, 'firstProfitBreakevenTriggerRScalp', 0.08),
                 FEATURE_MAX_ADVERSE_EXIT: Boolean(this.readFormValue(form, 'maxAdverseExitEnabled', document.getElementById('maxAdverseExitEnabled')?.checked ?? true)),
-                MAX_ADVERSE_R: this.readNumber(form, 'maxAdverseR', 0.60),
+                MAX_ADVERSE_R: this.readNumber(form, 'maxAdverseR', 0.90),
                 FEATURE_REVERSE_PROFIT_EXIT: Boolean(this.readFormValue(form, 'reverseProfitExitEnabled', document.getElementById('reverseProfitExitEnabled')?.checked ?? true)),
                 REVERSE_PROFIT_MIN_R: this.readNumber(form, 'reverseProfitMinR', 1.20),
                 REVERSE_PROFIT_GIVEBACK_PCT: this.readPercentDecimal(form, 'reverseProfitGivebackPct', 0.45),
@@ -2753,7 +2753,7 @@ class Bot {
                 SIGNAL_LOCKOUT_ENABLED: Boolean(this.readFormValue(form, 'signalLockoutEnabled', document.getElementById('signalLockoutEnabled')?.checked ?? true)),
                 MAX_ACTIVE_TRADES_TOTAL: Math.round(this.readNumber(form, 'maxActiveTradesTotal', 10)),
                 MAX_TRADES_PER_SYMBOL: Math.round(this.readNumber(form, 'maxTradesPerSymbol', 1)),
-                TRADE_COOLDOWN_MINUTES: Math.round(this.readNumber(form, 'tradeCooldownMinutes', 3)),
+                TRADE_COOLDOWN_MINUTES: Math.round(this.readNumber(form, 'tradeCooldownMinutes', 0)),
                 NO_REVENGE_COOLDOWN_SECONDS: Math.round(this.readNumber(form, 'noRevengeCooldown', 24)) * 3600,
                 FEATURE_REVERSAL_SHOCK_GUARD: Boolean(this.readFormValue(form, 'reversalShockGuardEnabled', document.getElementById('reversalShockGuardEnabled')?.checked ?? true)),
                 REVERSAL_SHOCK_COOLDOWN_MINUTES: Math.round(this.readNumber(form, 'reversalShockCooldownMinutes', 30)),

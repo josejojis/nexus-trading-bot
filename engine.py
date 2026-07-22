@@ -1,25 +1,28 @@
 """
 Trading Engine - Core Bot Logic
 """
+import json
 import logging
 import threading
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
+import types
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 from mt5_interface import MT5Interface
 from analytic_engine import AnalyticEngine
-from predictive_engine import PredictiveEngine
 from ensemble_decision import EnsembleDecision
 from trade_logger import TradeLogger
 from pending_order_manager import PendingOrderManager
 from conditional_watchlist_manager import ConditionalWatchlistManager
 from bible_logic import validate_trade
-from technical_analysis import scan_symbols
+from technical_analysis import scan_symbols, detect_forex_pattern
 
 
 class TradingEngine:
@@ -34,7 +37,7 @@ class TradingEngine:
         self._positions_lock = threading.Lock()
         self._trades_lock = threading.Lock()
         
-        self.symbols = os.getenv("TRADING_SYMBOLS", "EURUSD,GBPUSD,USDJPY").split(",")
+        self.symbols = os.getenv("TRADING_SYMBOLS", "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,EURJPY,GBPJPY,USDCHF,XAUUSD").split(",")
         execution_symbols_raw = os.getenv("EXECUTION_SYMBOLS", "").strip()
         self.execution_symbols = [
             s.strip().upper()
@@ -53,22 +56,11 @@ class TradingEngine:
         self.min_professional_conviction = max(float(os.getenv("MIN_PROFESSIONAL_CONVICTION", 0.30)), 0.38)
         self.broker_min_lot_fallback_enabled = os.getenv("FEATURE_BROKER_MIN_LOT_FALLBACK", "true").lower() in ["true", "1", "yes"]
         self.max_auto_min_lot = float(os.getenv("MAX_AUTO_MIN_LOT", 0.01))
-        self.dynamic_account_profile_enabled = os.getenv("FEATURE_DYNAMIC_ACCOUNT_PROFILE", "true").lower() in ["true", "1", "yes"]
-        self.small_account_mode_enabled = os.getenv("FEATURE_SMALL_ACCOUNT_MODE", "false").lower() in ["true", "1", "yes"]
-        self.small_account_threshold = float(os.getenv("SMALL_ACCOUNT_EQUITY_THRESHOLD", 25))
-        self.small_account_trade_volume = float(os.getenv("SMALL_ACCOUNT_TRADE_VOLUME", 0.001))
-        self.small_account_max_auto_min_lot = float(os.getenv("SMALL_ACCOUNT_MAX_AUTO_MIN_LOT", 0.01))
-        self.small_account_max_exposure_pct = float(os.getenv("SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT", 0.01))
-        self.small_account_max_active_trades = int(os.getenv("SMALL_ACCOUNT_MAX_ACTIVE_TRADES", 1))
-        self.small_account_allow_metals = os.getenv("SMALL_ACCOUNT_ALLOW_METALS", "false").lower() in ["true", "1", "yes"]
-        self.small_account_allow_crypto = os.getenv("SMALL_ACCOUNT_ALLOW_CRYPTO", "false").lower() in ["true", "1", "yes"]
-        self.small_account_allow_stocks = os.getenv("SMALL_ACCOUNT_ALLOW_STOCKS", "false").lower() in ["true", "1", "yes"]
-        self.small_account_disable_news_ladder = os.getenv("SMALL_ACCOUNT_DISABLE_NEWS_LADDER", "true").lower() in ["true", "1", "yes"]
-        self.small_account_disable_pending_orders = os.getenv("SMALL_ACCOUNT_DISABLE_PENDING_ORDERS", "true").lower() in ["true", "1", "yes"]
-        self.small_account_active = False
-        self.account_profile_name = "manual"
+        # All accounts are rendered as standard by default.
+        # Lot sizing is user-controlled via TRADE_VOLUME, not forced by account equity.
+        self.dynamic_account_profile_enabled = False
+        self.account_profile_name = "standard"
         self.account_profile_equity = None
-        self.dynamic_profile_last_applied_at = None
         self.active_trades = {}
         self.armed_signals = {}
 
@@ -82,6 +74,8 @@ class TradingEngine:
         self.logic_feed = []
         # all detected signals (for logs and watchlist)
         self.signal_history = []
+        # recognized forex pattern history for adaptive decision support
+        self.pattern_history = []
         # future trade candidates for dashboard
         self.future_trades = []
         # trade journal (open/closed trade tracking)
@@ -94,14 +88,35 @@ class TradingEngine:
         self.rule_config = {"ema": False, "volume": False, "po3": False}
 
         # risk management
-        self.risk_pct = 0.0  # legacy field; sizing is fixed-lot only
-        self.position_sizing_mode = "fixed"
+        self._default_position_sizing_mode = "fixed"
+        self._default_risk_pct = 0.01
+
+        env_mode = os.getenv("POSITION_SIZING_MODE")
+        if env_mode is not None and str(env_mode).strip():
+            self.position_sizing_mode = str(env_mode).strip().lower()
+        else:
+            self.position_sizing_mode = self._default_position_sizing_mode
+        if self.position_sizing_mode not in {"fixed", "dynamic"}:
+            self.position_sizing_mode = self._default_position_sizing_mode
+
+        env_risk = os.getenv("RISK_PER_TRADE_PCT")
+        if env_risk is not None and str(env_risk).strip():
+            try:
+                self.risk_pct = float(env_risk)
+            except Exception:
+                self.risk_pct = self._default_risk_pct
+        else:
+            self.risk_pct = self._default_risk_pct
+        if self.risk_pct <= 0:
+            self.risk_pct = self._default_risk_pct
+        elif self.risk_pct > 0.10:
+            self.risk_pct = 0.10
         self.max_exposure_pct = float(os.getenv("MAX_EXPOSURE_PERCENT", 0.05))  # max exposure on open positions
-        self.no_revenge_cooldown = int(os.getenv("NO_REVENGE_COOLDOWN_SECONDS", 24 * 3600))
+        self.no_revenge_cooldown = int(os.getenv("NO_REVENGE_COOLDOWN_SECONDS", 0))
         self.cooldown_until = None
-        self.reversal_shock_guard_enabled = os.getenv("FEATURE_REVERSAL_SHOCK_GUARD", "true").lower() in ["true", "1", "yes"]
-        self.reversal_shock_cooldown_minutes = int(os.getenv("REVERSAL_SHOCK_COOLDOWN_MINUTES", 30))
-        self.reversal_shock_xau_cooldown_minutes = int(os.getenv("REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES", 60))
+        self.reversal_shock_guard_enabled = os.getenv("FEATURE_REVERSAL_SHOCK_GUARD", "false").lower() in ["true", "1", "yes"]
+        self.reversal_shock_cooldown_minutes = int(os.getenv("REVERSAL_SHOCK_COOLDOWN_MINUTES", 0))
+        self.reversal_shock_xau_cooldown_minutes = int(os.getenv("REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES", 0))
         self.opposing_signal_profit_exit_enabled = os.getenv("FEATURE_OPPOSING_SIGNAL_PROFIT_EXIT", "true").lower() in ["true", "1", "yes"]
         self.opposing_signal_min_r = float(os.getenv("OPPOSING_SIGNAL_MIN_R", 0.20))
         self.opposing_signal_min_score = float(os.getenv("OPPOSING_SIGNAL_MIN_SCORE", 0.58))
@@ -111,15 +126,22 @@ class TradingEngine:
 
         # Daily profit cap - shut down after hitting target
         self.daily_profit_cap = float(os.getenv("DAILY_PROFIT_CAP", 0.02))  # 2% daily profit cap
-        self.daily_loss_brake_enabled = os.getenv("FEATURE_DAILY_LOSS_BRAKE", "true").lower() in ["true", "1", "yes"]
+        self.daily_profit_cap_extension = float(os.getenv("DAILY_PROFIT_CAP_EXTENSION", 0.0))
+        self.daily_loss_brake_enabled = False  # Disabled: no daily loss cap blocking new trades
         self.daily_loss_cap_pct = float(os.getenv("DAILY_LOSS_CAP_PERCENT", 0.05))
         self.max_daily_losses = int(os.getenv("MAX_DAILY_LOSSES", 100))
         self.max_consecutive_losses = int(os.getenv("MAX_CONSECUTIVE_LOSSES", 30))
-        self.loss_cooldown_minutes = int(os.getenv("LOSS_COOLDOWN_MINUTES", 3))
+        self.loss_cooldown_minutes = int(os.getenv("LOSS_COOLDOWN_MINUTES", 0))
         self.max_active_trades_total = int(os.getenv("MAX_ACTIVE_TRADES_TOTAL", 10))
         self.catastrophic_loss_stop_enabled = os.getenv("FEATURE_CATASTROPHIC_LOSS_STOP", "true").lower() in ["true", "1", "yes"]
         self.catastrophic_loss_r = float(os.getenv("CATASTROPHIC_LOSS_R", 1.5))
-        self.catastrophic_loss_cooldown_minutes = int(os.getenv("CATASTROPHIC_LOSS_COOLDOWN_MINUTES", 60))
+        self.catastrophic_loss_cooldown_minutes = int(os.getenv("CATASTROPHIC_LOSS_COOLDOWN_MINUTES", 0))
+        self.currency_basket_guard_enabled = os.getenv("FEATURE_CURRENCY_BASKET_GUARD", "true").lower() in ["true", "1", "yes"]
+        self.currency_basket_limits = self._parse_currency_basket_limits(os.getenv("CURRENCY_BASKET_LIMITS", "USD_SHORT:2,USD_LONG:2,JPY_SHORT:2,JPY_LONG:2"))
+        self.webhook_alerts_enabled = os.getenv("FEATURE_WEBHOOK_ALERTS", "true").lower() in ["true", "1", "yes"]
+        self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        self.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        self.discord_webhook_url = os.getenv("DISCORD_WEBHOOK", "").strip()
         self.daily_loss_count = 0
         self.consecutive_loss_count = 0
         self.last_loss_brake_reason = None
@@ -132,8 +154,8 @@ class TradingEngine:
         self.trade_registry = {}  # {symbol: {"active_trades": count, "last_trade_time": datetime, "cooldown_until": datetime, "shock_until": datetime}}
         self.signal_lockout_enabled = True  # Master switch for lockout system
         self.max_trades_per_symbol = int(os.getenv("MAX_TRADES_PER_SYMBOL", 1))  # Default: 1 trade per symbol
-        self.trade_cooldown_minutes = int(os.getenv("TRADE_COOLDOWN_MINUTES", 1))  # Faster early-entry retry window
-        self.cooldown_override_enabled = os.getenv("FEATURE_COOLDOWN_OVERRIDE", "true").lower() in ["true", "1", "yes"]
+        self.trade_cooldown_minutes = int(os.getenv("TRADE_COOLDOWN_MINUTES", 0))  # Faster early-entry retry window
+        self.cooldown_override_enabled = os.getenv("FEATURE_COOLDOWN_OVERRIDE", "false").lower() in ["true", "1", "yes"]
         self.cooldown_override_min_grade = os.getenv("COOLDOWN_OVERRIDE_MIN_GRADE", "A").strip().upper() or "A"
         self.cooldown_override_min_score = float(os.getenv("COOLDOWN_OVERRIDE_MIN_SCORE", 0.78))
         self.cooldown_override_min_conviction = float(os.getenv("COOLDOWN_OVERRIDE_MIN_CONVICTION", 0.45))
@@ -151,7 +173,7 @@ class TradingEngine:
         self.last_scan_signal_count = 0
         self._signal_log_cache = {}
         self._signal_execution_ledger = {}
-        self.duplicate_signal_cooldown_seconds = int(os.getenv("DUPLICATE_SIGNAL_COOLDOWN_SECONDS", 300))
+        self.duplicate_signal_cooldown_seconds = int(os.getenv("DUPLICATE_SIGNAL_COOLDOWN_SECONDS", 0))
         self.signal_execution_ttl_seconds = int(os.getenv("SIGNAL_EXECUTION_TTL_SECONDS", 900))
         self.armed_confirmation_enabled = os.getenv("FEATURE_ARMED_CONFIRMATION", "true").lower() in ["true", "1", "yes"]
         self.armed_required_scans = max(1, int(os.getenv("ARMED_CONFIRMATION_REQUIRED_SCANS", 2)))
@@ -167,26 +189,21 @@ class TradingEngine:
         self.trailing_stop_min_step_pips = float(os.getenv("TRAILING_STOP_MIN_STEP_PIPS", 5.0))
         self.trailing_tp_enabled = os.getenv("FEATURE_TRAILING_TAKE_PROFIT", "true").lower() in ["true", "1", "yes"]
         self.trailing_tp_trigger_pct = float(os.getenv("TRAILING_TP_TRIGGER_PCT", 0.85))
-        self.trailing_tp_extension_pct = float(os.getenv("TRAILING_TP_EXTENSION_PCT", 0.5))
-        self.trailing_tp_cooldown_seconds = int(os.getenv("TRAILING_TP_COOLDOWN_SECONDS", 300))
+        self.trailing_tp_extension_pct = float(os.getenv("TRAILING_TP_EXTENSION_PCT", 0.30))
+        self.trailing_tp_cooldown_seconds = int(os.getenv("TRAILING_TP_COOLDOWN_SECONDS", 0))
         self.partial_tp_extend_enabled = os.getenv("FEATURE_PARTIAL_TP_EXTEND", "true").lower() in ["true", "1", "yes"]
-        self.partial_tp_extend_pct = float(os.getenv("PARTIAL_TP_EXTEND_PCT", self.trailing_tp_extension_pct))
+        self.partial_tp_extend_pct = float(os.getenv("PARTIAL_TP_EXTEND_PCT", 0.25))
         self.partial_tp_enabled = os.getenv("FEATURE_PARTIAL_TAKE_PROFIT", "true").lower() in ["true", "1", "yes"]
-        self.partial_tp_trigger_r = float(os.getenv("PARTIAL_TP_TRIGGER_R", 0.65))
-        self.partial_tp_close_pct = float(os.getenv("PARTIAL_TP_CLOSE_PCT", 0.5))
-        self.partial_tp_lock_pips = float(os.getenv("PARTIAL_TP_LOCK_PIPS", 12.0))
+        self.partial_tp_trigger_r = float(os.getenv("PARTIAL_TP_TRIGGER_R", 0.80))
+        self.partial_tp_close_pct = float(os.getenv("PARTIAL_TP_CLOSE_PCT", 0.35))
+        self.partial_tp_lock_pips = float(os.getenv("PARTIAL_TP_LOCK_PIPS", 15.0))
         self.breakeven_protection_enabled = os.getenv("FEATURE_BREAKEVEN_PROTECTION", "true").lower() in ["true", "1", "yes"]
-        self.breakeven_trigger_r = float(os.getenv("BREAKEVEN_TRIGGER_R", 0.20))
-        self.breakeven_lock_pips = float(os.getenv("BREAKEVEN_LOCK_PIPS", 2.0))
+        self.breakeven_trigger_r = float(os.getenv("BREAKEVEN_TRIGGER_R", 0.30))
+        self.breakeven_lock_pips = float(os.getenv("BREAKEVEN_LOCK_PIPS", 5.0))
         self.first_profit_breakeven_enabled = os.getenv("FEATURE_FIRST_PROFIT_BREAKEVEN", "true").lower() in ["true", "1", "yes"]
-        self.first_profit_breakeven_trigger_r = float(os.getenv("FIRST_PROFIT_BREAKEVEN_TRIGGER_R", 0.05))
-        self.first_profit_breakeven_trigger_r_scalp = float(os.getenv("FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP", 0.03))
+        self.first_profit_breakeven_trigger_r = float(os.getenv("FIRST_PROFIT_BREAKEVEN_TRIGGER_R", 0.15))
+        self.first_profit_breakeven_trigger_r_scalp = float(os.getenv("FIRST_PROFIT_BREAKEVEN_TRIGGER_R_SCALP", 0.08))
         self.reversal_breakeven_at_entry_enabled = os.getenv("FEATURE_REVERSAL_BREAKEVEN_AT_ENTRY", "true").lower() in ["true", "1", "yes"]
-        self.reverse_profit_exit_enabled = os.getenv("FEATURE_REVERSE_PROFIT_EXIT", "true").lower() in ["true", "1", "yes"]
-        self.reverse_profit_min_r = float(os.getenv("REVERSE_PROFIT_MIN_R", 1.20))
-        self.reverse_profit_giveback_pct = float(os.getenv("REVERSE_PROFIT_GIVEBACK_PCT", 0.45))
-        self.reverse_profit_close_pct = float(os.getenv("REVERSE_PROFIT_CLOSE_PCT", 0.5))
-        self.reverse_after_partial_lock_r = float(os.getenv("REVERSE_AFTER_PARTIAL_LOCK_R", 0.20))
         self.max_adverse_exit_enabled = os.getenv("FEATURE_MAX_ADVERSE_EXIT", "true").lower() in ["true", "1", "yes"]
         self.max_adverse_r = float(os.getenv("MAX_ADVERSE_R", 0.90))
         self.symbol_profiles_enabled = os.getenv("FEATURE_SYMBOL_PROFILES", "true").lower() in ["true", "1", "yes"]
@@ -198,8 +215,8 @@ class TradingEngine:
         self.swing_profile_enabled = os.getenv("ENABLE_SWING_PROFILE", "true").lower() in ["true", "1", "yes"]
         self.min_expected_r = float(os.getenv("MIN_EXPECTED_R", 1.5))
         self.min_expected_r_scalp = float(os.getenv("MIN_EXPECTED_R_SCALP", 1.0))
-        self.take_profit_r_multiplier = float(os.getenv("TAKE_PROFIT_R_MULTIPLIER", 1.8))
-        self.take_profit_r_multiplier_scalp = float(os.getenv("TAKE_PROFIT_R_MULTIPLIER_SCALP", 1.5))
+        self.take_profit_r_multiplier = float(os.getenv("TAKE_PROFIT_R_MULTIPLIER", 2.1))
+        self.take_profit_r_multiplier_scalp = float(os.getenv("TAKE_PROFIT_R_MULTIPLIER_SCALP", 1.6))
         self.execution_conviction_threshold = float(os.getenv("EXECUTION_CONVICTION_THRESHOLD", 0.35))
         self.execution_setup_score_threshold = float(os.getenv("EXECUTION_SETUP_SCORE_THRESHOLD", 0.62))
         self.execution_archetype_score_threshold = float(os.getenv("EXECUTION_ARCHETYPE_SCORE_THRESHOLD", 0.70))
@@ -246,10 +263,10 @@ class TradingEngine:
         
         # War Room Engines
         self.analytic_engine = AnalyticEngine()
-        self.predictive_engine = PredictiveEngine()
-        analytic_weight = float(os.getenv("ANALYTIC_WEIGHT", 0.6))
-        predictive_weight = float(os.getenv("PREDICTIVE_WEIGHT", 0.4))
-        self.ensemble_decision = EnsembleDecision(analytic_weight, predictive_weight)
+        analytic_weight = float(os.getenv("ANALYTIC_WEIGHT", 1.0))
+        self.ensemble_decision = EnsembleDecision(analytic_weight, 0.0)
+        # Predictive engine removed from runtime; keep a lightweight stub to satisfy tests and legacy checks
+        self.predictive_engine = types.SimpleNamespace(model=False)
         self.conviction_threshold = float(os.getenv("CONVICTION_THRESHOLD", 0.20))
         
         # Feature toggles (can be controlled via UI)
@@ -264,6 +281,9 @@ class TradingEngine:
 
     def _validate_config(self):
         """CRITICAL FIX: Validate all configuration values on startup"""
+        current_mode = str(getattr(self, "position_sizing_mode", "") or "").strip().lower()
+        current_mode = current_mode if current_mode in {"fixed", "dynamic"} else "fixed"
+        current_risk = getattr(self, "risk_pct", None)
         try:
             # Validate TRADING_SYMBOLS
             if isinstance(self.symbols, str):
@@ -284,7 +304,40 @@ class TradingEngine:
                 self.volume = 0.001
             elif self.volume > 10:
                 logger.warning(f"TRADE_VOLUME is very high: {self.volume}. Consider reducing.")
-            self.position_sizing_mode = "fixed"
+
+            # Validate position sizing mode.
+            current_mode = str(getattr(self, "position_sizing_mode", "") or "").strip().lower()
+            if current_mode in {"fixed", "dynamic"} and current_mode != self._default_position_sizing_mode:
+                mode = current_mode
+            else:
+                env_mode = os.getenv("POSITION_SIZING_MODE")
+                if env_mode is not None and str(env_mode).strip():
+                    mode = str(env_mode).strip().lower()
+                else:
+                    mode = self._default_position_sizing_mode
+            if mode not in {"fixed", "dynamic"}:
+                mode = self._default_position_sizing_mode
+            self.position_sizing_mode = mode
+
+            # Validate risk percentage for dynamic sizing.
+            current_risk = getattr(self, "risk_pct", None)
+            env_risk = os.getenv("RISK_PER_TRADE_PCT")
+            if env_risk is not None and str(env_risk).strip():
+                try:
+                    risk_pct = float(env_risk)
+                except Exception:
+                    risk_pct = self._default_risk_pct
+            elif current_risk is not None and float(current_risk) != self._default_risk_pct:
+                risk_pct = float(current_risk)
+            else:
+                risk_pct = self._default_risk_pct
+            if risk_pct <= 0:
+                logger.warning(f"Invalid risk_pct {risk_pct}; using default 0.01")
+                risk_pct = 0.01
+            elif risk_pct > 0.10:
+                logger.warning(f"Risk pct {risk_pct} is very high; clamping to 0.10")
+                risk_pct = 0.10
+            self.risk_pct = risk_pct
             
             # Validate MAX_EXPOSURE_PERCENT (allow 5 or 0.05 style inputs)
             if self.max_exposure_pct <= 0:
@@ -309,26 +362,15 @@ class TradingEngine:
             self.breakeven_lock_pips = max(0.0, self.breakeven_lock_pips)
             self.first_profit_breakeven_trigger_r = max(0.02, self.first_profit_breakeven_trigger_r)
             self.first_profit_breakeven_trigger_r_scalp = max(0.02, self.first_profit_breakeven_trigger_r_scalp)
-            self.reverse_profit_min_r = max(0.1, self.reverse_profit_min_r)
-            self.reverse_profit_giveback_pct = max(0.05, min(0.95, self.reverse_profit_giveback_pct))
-            self.reverse_profit_close_pct = max(0.1, min(1.0, self.reverse_profit_close_pct))
             self.max_adverse_r = max(0.1, min(2.0, self.max_adverse_r))
-            self.reverse_after_partial_lock_r = max(0.0, self.reverse_after_partial_lock_r)
             self.daily_loss_cap_pct = max(0.005, min(0.10, self.daily_loss_cap_pct))
             self.max_daily_losses = max(0, min(100, self.max_daily_losses))
             self.max_consecutive_losses = max(0, min(100, self.max_consecutive_losses))
             self.loss_cooldown_minutes = max(0, self.loss_cooldown_minutes)
             self.max_active_trades_total = max(1, min(20, self.max_active_trades_total))
-            self.small_account_threshold = max(1.0, self.small_account_threshold)
-            self.small_account_trade_volume = max(0.001, self.small_account_trade_volume)
-            self.small_account_max_auto_min_lot = max(0.001, min(0.10, self.small_account_max_auto_min_lot))
-            if self.small_account_max_exposure_pct > 1 and self.small_account_max_exposure_pct <= 100:
-                self.small_account_max_exposure_pct = self.small_account_max_exposure_pct / 100.0
-            self.small_account_max_exposure_pct = max(0.001, min(0.05, self.small_account_max_exposure_pct))
-            self.small_account_max_active_trades = max(1, min(5, self.small_account_max_active_trades))
             self.catastrophic_loss_r = max(0.5, self.catastrophic_loss_r)
             self.catastrophic_loss_cooldown_minutes = max(0, self.catastrophic_loss_cooldown_minutes)
-            self.reversal_shock_cooldown_minutes = max(1, self.reversal_shock_cooldown_minutes)
+            self.reversal_shock_cooldown_minutes = max(0, self.reversal_shock_cooldown_minutes)
             self.reversal_shock_xau_cooldown_minutes = max(self.reversal_shock_cooldown_minutes, self.reversal_shock_xau_cooldown_minutes)
             self.opposing_signal_min_r = max(0.0, self.opposing_signal_min_r)
             self.opposing_signal_min_score = max(0.0, min(1.0, self.opposing_signal_min_score))
@@ -347,18 +389,24 @@ class TradingEngine:
             if self.min_execution_grade not in {"A", "B", "C", "D"}:
                 self.min_execution_grade = "B"
             
-            logger.info(f"Config validated: Sizing=fixed, Volume={self.volume}, MaxOpenRisk={self.max_exposure_pct*100}%, MinProfit={self.min_profit_pips}p")
+            logger.info(f"Config validated: Sizing={self.position_sizing_mode}, Volume={self.volume}, RiskPct={self.risk_pct:.4f}, MaxOpenRisk={self.max_exposure_pct*100:.2f}%, MinProfit={self.min_profit_pips}p")
             
             # Initialize symbols from MT5 Market Watch for multi-pair awareness
             self._initialize_symbols_from_market_watch()
             self._apply_dynamic_account_profile()
             
         except Exception as e:
-            logger.critical(f"Config validation error: {e}. Using safe defaults.")
+            logger.critical(f"Config validation error: {e}. Preserving current sizing state.")
             self.symbols = ["EURUSD"]
             self.volume = 0.001
-            self.risk_pct = 0.0
-            self.position_sizing_mode = "fixed"
+            if current_risk is not None:
+                try:
+                    self.risk_pct = float(current_risk)
+                except Exception:
+                    self.risk_pct = 0.01
+            else:
+                self.risk_pct = 0.01
+            self.position_sizing_mode = current_mode
             self.max_exposure_pct = 0.05
             self.min_profit_pips = 10
 
@@ -447,185 +495,12 @@ class TradingEngine:
         info = self.mt5.get_account_info() or {}
         return info.get("equity")
 
-    def _small_account_mode_should_apply(self, equity: float | None = None) -> bool:
-        if not self.small_account_mode_enabled:
-            return False
-        try:
-            current_equity = float(equity if equity is not None else (self._get_equity() or 0))
-        except Exception:
-            current_equity = 0.0
-        return current_equity > 0 and current_equity <= self.small_account_threshold
-
-    def _apply_small_account_overlay(self, equity: float | None = None):
-        self.small_account_active = self._small_account_mode_should_apply(equity)
-        if not self.small_account_active:
-            return
-
-        self.account_profile_name = "small_account"
-        self.volume = max(0.001, self.small_account_trade_volume)
-        self.max_auto_min_lot = max(0.001, min(self.max_auto_min_lot, self.small_account_max_auto_min_lot))
-        self.max_exposure_pct = min(self.max_exposure_pct, self.small_account_max_exposure_pct)
-        self.max_active_trades_total = max(1, min(self.max_active_trades_total, self.small_account_max_active_trades))
-        self.max_trades_per_symbol = 1
-        self.allow_c_scalps = False
-        if self.min_execution_grade not in {"A"}:
-            self.min_execution_grade = "B"
-        self.min_trade_readiness_score = max(self.min_trade_readiness_score, 0.60)
-        self.min_professional_score = max(self.min_professional_score, 0.62)
-        self.min_professional_conviction = max(self.min_professional_conviction, 0.30)
-        self.broker_min_lot_fallback_enabled = True
-        if self.small_account_disable_news_ladder:
-            self.news_ladder_enabled = False
-        if self.small_account_disable_pending_orders:
-            self.features["pending_orders"] = False
-
     def _apply_dynamic_account_profile(self):
-        """Adapt execution strictness and fixed lot size to the attached MT5 account equity."""
+        """Dynamic account profiling is disabled; keep all accounts on standard settings."""
         self.news_ladder_enabled = str(self._read_env_value("FEATURE_NEWS_LADDER", str(self.news_ladder_enabled))).lower() in ["true", "1", "yes"]
         self.features["pending_orders"] = str(self._read_env_value("FEATURE_PENDING_ORDERS", str(self.features.get("pending_orders", True)))).lower() in ["true", "1", "yes"]
-        self.small_account_active = False
-        if not self.dynamic_account_profile_enabled:
-            self.account_profile_name = "manual"
-            self._apply_small_account_overlay()
-            return
-
-        try:
-            equity = float(self._get_equity() or 0)
-        except Exception:
-            equity = 0.0
-        if equity <= 0:
-            self._apply_small_account_overlay()
-            return
-
-        def env_float(key, default):
-            try:
-                return float(os.getenv(key, default))
-            except Exception:
-                return float(default)
-
-        if equity < 25:
-            profile = {
-                "name": "tiny",
-                "volume": env_float("DYNAMIC_TINY_TRADE_VOLUME", 0.001),
-                "max_auto_min_lot": env_float("DYNAMIC_TINY_MAX_AUTO_MIN_LOT", 0.01),
-                "grade": "B",
-                "allow_c_scalps": False,
-                "setup": 0.62,
-                "readiness": 0.58,
-                "professional_conviction": 0.30,
-                "market_score": 0.45,
-                "market_conviction": 0.30,
-                "session_trade": 0.40,
-                "session_scalp": 0.55,
-                "cooldown": 0,
-                "daily_loss_cap_pct": 0.03,
-                "max_daily_losses": 1,
-                "max_consecutive_losses": 1,
-                "loss_cooldown_minutes": 360,
-                "max_active_trades_total": 1,
-            }
-        elif equity < 100:
-            profile = {
-                "name": "small",
-                "volume": env_float("DYNAMIC_SMALL_TRADE_VOLUME", 0.001),
-                "max_auto_min_lot": env_float("DYNAMIC_SMALL_MAX_AUTO_MIN_LOT", 0.01),
-                "grade": "B",
-                "allow_c_scalps": False,
-                "setup": 0.60,
-                "readiness": 0.56,
-                "professional_conviction": 0.28,
-                "market_score": 0.44,
-                "market_conviction": 0.30,
-                "session_trade": 0.38,
-                "session_scalp": 0.52,
-                "cooldown": 0,
-                "daily_loss_cap_pct": 0.04,
-                "max_daily_losses": 1,
-                "max_consecutive_losses": 1,
-                "loss_cooldown_minutes": 240,
-                "max_active_trades_total": 1,
-            }
-        elif equity < 500:
-            profile = {
-                "name": "standard",
-                "volume": env_float("DYNAMIC_STANDARD_TRADE_VOLUME", 0.01),
-                "max_auto_min_lot": env_float("DYNAMIC_STANDARD_MAX_AUTO_MIN_LOT", 0.02),
-                "grade": "B",
-                "allow_c_scalps": False,
-                "setup": 0.56,
-                "readiness": 0.54,
-                "professional_conviction": 0.25,
-                "market_score": 0.42,
-                "market_conviction": 0.30,
-                "session_trade": 0.35,
-                "session_scalp": 0.45,
-                "cooldown": 0,
-                "daily_loss_cap_pct": 0.05,
-                "max_daily_losses": 2,
-                "max_consecutive_losses": 1,
-                "loss_cooldown_minutes": 120,
-                "max_active_trades_total": 1,
-            }
-        else:
-            profile = {
-                "name": "large",
-                "volume": env_float("DYNAMIC_LARGE_TRADE_VOLUME", 0.02),
-                "max_auto_min_lot": env_float("DYNAMIC_LARGE_MAX_AUTO_MIN_LOT", 0.05),
-                "grade": "B",
-                "allow_c_scalps": False,
-                "setup": 0.62,
-                "readiness": 0.60,
-                "professional_conviction": 0.30,
-                "market_score": 0.45,
-                "market_conviction": 0.35,
-                "session_trade": 0.40,
-                "session_scalp": 0.55,
-                "cooldown": 0,
-                "daily_loss_cap_pct": 0.05,
-                "max_daily_losses": 2,
-                "max_consecutive_losses": 2,
-                "loss_cooldown_minutes": 60,
-                "max_active_trades_total": 2,
-            }
-
-        self.account_profile_name = profile["name"]
-        self.account_profile_equity = equity
-        self.dynamic_profile_last_applied_at = datetime.now().isoformat()
-        self.volume = max(0.001, profile["volume"])
-        self.max_auto_min_lot = max(0.001, profile["max_auto_min_lot"])
-        self.position_sizing_mode = "fixed"
-        self.min_execution_grade = profile["grade"]
-        self.allow_c_scalps = bool(profile.get("allow_c_scalps", False))
-        self.min_professional_score = profile["setup"]
-        self.min_professional_conviction = profile["professional_conviction"]
-        self.min_trade_readiness_score = profile["readiness"]
-        self.market_execution_score_threshold = profile["market_score"]
-        self.market_execution_conviction_threshold = profile["market_conviction"]
-        self.min_session_score_for_trade = profile["session_trade"]
-        self.min_session_score_for_scalp = profile["session_scalp"]
-        try:
-            self.trade_cooldown_minutes = max(0, int(os.getenv("TRADE_COOLDOWN_MINUTES", profile["cooldown"])))
-        except Exception:
-            self.trade_cooldown_minutes = profile["cooldown"]
-        self.daily_loss_cap_pct = profile["daily_loss_cap_pct"]
-        try:
-            self.max_daily_losses = max(0, min(100, int(os.getenv("MAX_DAILY_LOSSES", profile["max_daily_losses"]))))
-        except Exception:
-            self.max_daily_losses = profile["max_daily_losses"]
-        try:
-            self.max_consecutive_losses = max(0, min(100, int(os.getenv("MAX_CONSECUTIVE_LOSSES", profile["max_consecutive_losses"]))))
-        except Exception:
-            self.max_consecutive_losses = profile["max_consecutive_losses"]
-        self.loss_cooldown_minutes = profile["loss_cooldown_minutes"]
-        try:
-            configured_total = int(os.getenv("MAX_ACTIVE_TRADES_TOTAL", profile["max_active_trades_total"]))
-        except Exception:
-            configured_total = profile["max_active_trades_total"]
-        self.max_active_trades_total = max(1, min(20, configured_total))
-        self.armed_required_scans = 1
-        self.armed_require_structure = False
-        self.broker_min_lot_fallback_enabled = True
-        self._apply_small_account_overlay(equity)
+        self.account_profile_name = "standard"
+        return
 
     def _get_symbol_info(self, symbol: str):
         return self.mt5.get_symbol_info(symbol)
@@ -712,9 +587,9 @@ class TradingEngine:
                 return False
             
             daily_profit_pct = (current_equity - self.daily_start_equity) / self.daily_start_equity
-            
-            if daily_profit_pct >= self.daily_profit_cap:
-                logger.info(f"Daily profit cap reached: {daily_profit_pct*100:.2f}% >= {self.daily_profit_cap*100:.1f}%")
+            effective_cap = self.daily_profit_cap + max(0.0, self.daily_profit_cap_extension)
+            if daily_profit_pct >= effective_cap:
+                logger.info(f"Daily profit cap reached: {daily_profit_pct*100:.2f}% >= {effective_cap*100:.1f}%")
                 return True
             
             return False
@@ -759,29 +634,98 @@ class TradingEngine:
             return 0.001
 
     def _calculate_volume(self, symbol: str, entry: float, sl: float) -> float:
-        """Return the configured fixed lot size, rounded to the broker symbol step."""
+        """Return the configured lot size.
+
+        Supports two modes via `POSITION_SIZING_MODE` env: `fixed` (default) and `dynamic`.
+        Dynamic sizing computes lots so that the dollar risk equals `RISK_PER_TRADE_PCT` of account equity.
+        Falls back to fixed sizing when instrument metadata or account info is unavailable.
+        """
+        mode = (getattr(self, 'position_sizing_mode', None) or os.getenv("POSITION_SIZING_MODE", "fixed")).strip().lower()
         info = self._get_symbol_info(symbol)
+
+        # Fixed sizing (legacy)
+        if mode != "dynamic":
+            if info:
+                min_lot = float(getattr(info, "volume_min", 0.001) or 0.001)
+                max_lot = float(getattr(info, "volume_max", 100) or 100)
+                lot_step = float(getattr(info, "volume_step", 0.001) or 0.001)
+                if self.volume < min_lot:
+                    if self.broker_min_lot_fallback_enabled and min_lot <= self.max_auto_min_lot:
+                        logger.warning(
+                            f"Fixed lot {self.volume} is below broker minimum {min_lot} for {symbol}; using broker minimum"
+                        )
+                        requested_volume = min_lot
+                    else:
+                        logger.error(
+                            f"Fixed lot {self.volume} is below broker minimum {min_lot} for {symbol}; rejecting trade"
+                        )
+                        return 0.0
+                else:
+                    requested_volume = self.volume
+                volume = min(max_lot, self._round_lot(requested_volume, lot_step))
+            else:
+                volume = self._round_lot(self.volume, 0.001)
+            logger.debug(f"Fixed lot sizing for {symbol}: volume={volume:.3f}")
+            return volume
+
+        # Dynamic sizing
+        try:
+            equity = float(self._get_equity() or self.start_equity or os.getenv("START_EQUITY", 1000.0))
+        except Exception:
+            equity = float(os.getenv("START_EQUITY", 1000.0))
+
+        # Prefer runtime engine attribute if set, otherwise fall back to env
+        try:
+            risk_pct = float(getattr(self, 'risk_pct', None) if getattr(self, 'risk_pct', None) is not None else os.getenv("RISK_PER_TRADE_PCT", 0.01))
+        except Exception:
+            risk_pct = 0.01
+        if risk_pct <= 0:
+            logger.warning(f"Dynamic sizing: invalid risk_pct {risk_pct}; falling back to 0.01")
+            risk_pct = 0.01
+        elif risk_pct > 0.10:
+            logger.warning(f"Dynamic sizing: risk_pct {risk_pct} exceeds safe limit; clamping to 0.10")
+            risk_pct = 0.10
+
+        target_risk = max(0.0, equity * risk_pct)
+
+        # If SL not provided or equal to entry, fallback to fixed
+        if entry is None or sl is None or abs(entry - sl) < 1e-12:
+            logger.warning("Dynamic sizing fallback: missing or zero stop; using fixed volume")
+            return self._round_lot(self.volume, 0.001)
+
+        pip_size = self._get_pip_size(symbol)
+        pip_value = self._get_pip_value(symbol)
+        if pip_size is None or pip_value is None:
+            logger.warning(f"Dynamic sizing: missing pip metadata for {symbol}; falling back to fixed volume {self.volume}")
+            return self._round_symbol_lot(symbol, self.volume)
+
+        stop_pips = abs(entry - sl) / float(pip_size)
+        if stop_pips <= 0:
+            logger.warning("Dynamic sizing: computed stop_pips <= 0; using fixed volume")
+            return self._round_symbol_lot(symbol, self.volume)
+
+        raw_lots = target_risk / (pip_value * stop_pips) if pip_value and stop_pips else 0.0
+
+        # Respect broker symbol limits
         if info:
             min_lot = float(getattr(info, "volume_min", 0.001) or 0.001)
             max_lot = float(getattr(info, "volume_max", 100) or 100)
             lot_step = float(getattr(info, "volume_step", 0.001) or 0.001)
-            if self.volume < min_lot:
-                if self.broker_min_lot_fallback_enabled and min_lot <= self.max_auto_min_lot:
-                    logger.warning(
-                        f"Fixed lot {self.volume} is below broker minimum {min_lot} for {symbol}; using broker minimum"
-                    )
-                    requested_volume = min_lot
-                else:
-                    logger.error(
-                        f"Fixed lot {self.volume} is below broker minimum {min_lot} for {symbol}; rejecting trade"
-                    )
-                    return 0.0
-            else:
-                requested_volume = self.volume
-            volume = min(max_lot, self._round_lot(requested_volume, lot_step))
         else:
-            volume = self._round_lot(self.volume, 0.001)
-        logger.debug(f"Fixed lot sizing for {symbol}: volume={volume:.3f}")
+            min_lot, max_lot, lot_step = 0.001, 100.0, 0.001
+
+        # Enforce min lot and broker fallback
+        if raw_lots < min_lot:
+            if self.broker_min_lot_fallback_enabled and min_lot <= self.max_auto_min_lot:
+                logger.info(f"Dynamic sizing: computed {raw_lots:.6f} < min {min_lot}; using broker minimum")
+                raw_lots = min_lot
+            else:
+                logger.info(f"Dynamic sizing: computed {raw_lots:.6f} < min {min_lot}; using min {min_lot}")
+                raw_lots = min_lot
+
+        raw_lots = max(min(raw_lots, max_lot), min_lot)
+        volume = self._round_lot(raw_lots, lot_step)
+        logger.debug(f"Dynamic lot sizing for {symbol}: equity={equity:.2f} risk_pct={risk_pct:.4f} stop_pips={stop_pips:.2f} pip_value={pip_value:.3f} -> volume={volume:.3f}")
         return volume
 
     def _calculate_risk_amount(self, symbol: str, entry: float, sl: float, volume: float) -> float:
@@ -848,6 +792,222 @@ class TradingEngine:
             for item in details
         )
 
+    def _parse_currency_basket_limits(self, raw: str | None) -> dict:
+        """Parse a comma-separated list of bucket:limit pairs from the environment."""
+        limits = {}
+        if not raw:
+            return limits
+        for chunk in str(raw).split(","):
+            if not chunk or ":" not in chunk:
+                continue
+            bucket, limit = chunk.split(":", 1)
+            bucket = bucket.strip().upper()
+            try:
+                limits[bucket] = max(1, int(limit.strip()))
+            except Exception:
+                continue
+        return limits
+
+    def _split_symbol_currency(self, symbol: str) -> tuple[str | None, str | None]:
+        """Return the base/quote currency for common FX pairs when available."""
+        if not symbol:
+            return None, None
+        symbol = str(symbol).upper()
+        fx_currencies = {"EUR", "GBP", "AUD", "NZD", "USD", "JPY", "CHF", "CAD"}
+        if len(symbol) >= 6:
+            base = symbol[:3]
+            quote = symbol[3:6]
+            if base in fx_currencies and quote in fx_currencies:
+                return base, quote
+        return None, None
+
+    def _currency_buckets_for_symbol_action(self, symbol: str, action: str) -> list[str]:
+        """Translate a symbol/action into one or two directional currency buckets."""
+        base, quote = self._split_symbol_currency(symbol)
+        if not base or not quote:
+            return []
+        action = str(action or "").upper()
+        if action == "BUY":
+            return [f"{base}_LONG", f"{quote}_SHORT"]
+        if action == "SELL":
+            return [f"{base}_SHORT", f"{quote}_LONG"]
+        return []
+
+    def _guard_currency_basket_exposure(self, signal: dict) -> tuple[bool, str]:
+        """Block new entries that would overload a directional currency bucket."""
+        if not self.currency_basket_guard_enabled:
+            return True, "currency basket guard disabled"
+
+        symbol = (signal or {}).get("symbol")
+        action = (signal or {}).get("action")
+        buckets = self._currency_buckets_for_symbol_action(symbol, action)
+        if not buckets:
+            return True, "no basket mapping"
+
+        bucket_counts = {}
+        for trade in list(self.active_trades.values()):
+            trade_symbol = str(trade.get("symbol") or "").upper()
+            trade_action = str(trade.get("action") or "").upper()
+            for bucket in self._currency_buckets_for_symbol_action(trade_symbol, trade_action):
+                bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+
+        try:
+            for pos in self.mt5.get_positions() or []:
+                pos_symbol = str(pos.get("symbol") or "").upper()
+                pos_type = str(pos.get("type") or "").upper()
+                for bucket in self._currency_buckets_for_symbol_action(pos_symbol, pos_type):
+                    bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+        except Exception:
+            pass
+
+        for bucket in buckets:
+            limit = self.currency_basket_limits.get(bucket)
+            if limit is None:
+                continue
+            count = bucket_counts.get(bucket, 0)
+            if count >= limit:
+                return False, f"currency basket guard blocked {bucket} ({count}/{limit})"
+
+        return True, "currency basket guard OK"
+
+    def send_telegram_message(self, text: str) -> bool:
+        """Send a plain-text message to Telegram when configured."""
+        if not self.telegram_bot_token or not self.telegram_chat_id:
+            return False
+        message_text = str(text or "").strip()
+        if not message_text:
+            return False
+
+        params = urllib.parse.urlencode({"chat_id": self.telegram_chat_id, "text": message_text})
+        url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage?{params}"
+        try:
+            urllib.request.urlopen(url, timeout=5)
+            return True
+        except TypeError:
+            urllib.request.urlopen(url)
+            return True
+        except Exception as exc:
+            logger.warning(f"Telegram alert failed: {exc}")
+            return False
+
+    def _parse_telegram_command(self, text: str) -> dict:
+        """Parse a simple Telegram command into a structured action."""
+        if not text:
+            return {"kind": "unknown"}
+        cleaned = str(text).strip()
+        if not cleaned:
+            return {"kind": "unknown"}
+
+        if cleaned.lower() in {"/help", "help", "?"}:
+            return {"kind": "help"}
+
+        if cleaned.lower() in {"/status", "status"}:
+            return {"kind": "status"}
+
+        tokens = cleaned.split()
+        if not tokens:
+            return {"kind": "unknown"}
+
+        command = tokens[0].lower()
+        if command not in {"/buy", "/sell"}:
+            return {"kind": "unknown", "raw": cleaned}
+
+        if len(tokens) < 2:
+            return {"kind": "invalid", "reason": "Missing symbol"}
+
+        symbol = tokens[1].upper()
+        volume = 0.01
+        if len(tokens) >= 3:
+            try:
+                volume = float(tokens[2])
+            except ValueError:
+                return {"kind": "invalid", "reason": "Volume must be numeric"}
+
+        return {"kind": "trade", "action": "BUY" if command == "/buy" else "SELL", "symbol": symbol, "volume": volume}
+
+    def _build_telegram_help_message(self) -> str:
+        return (
+            "✨ Telegram Command Deck\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "• /buy EURUSD 0.01   → request a BUY order\n"
+            "• /sell GBPUSD 0.02 → request a SELL order\n"
+            "• /status           → show bot heartbeat\n"
+            "• /help             → show this deck"
+        )
+
+    def _build_telegram_status_message(self) -> str:
+        return (
+            "🧠 Nexus Bot Status\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Running: {'yes' if self.is_running else 'no'}\n"
+            f"Open trades: {len(self.active_trades)}\n"
+            f"Signals tracked: {len(self.recent_signals)}"
+        )
+
+    def _handle_telegram_command(self, text: str, chat_id: int | str | None = None) -> bool:
+        """Handle an incoming Telegram command and respond with a styled message."""
+        parsed = self._parse_telegram_command(text)
+        if parsed.get("kind") == "help":
+            return self.send_telegram_message(self._build_telegram_help_message())
+        if parsed.get("kind") == "status":
+            return self.send_telegram_message(self._build_telegram_status_message())
+        if parsed.get("kind") == "trade":
+            action = parsed.get("action")
+            symbol = parsed.get("symbol")
+            volume = parsed.get("volume")
+            reply = (
+                f"⚡ Trade request received\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Action: {action}\n"
+                f"Symbol: {symbol}\n"
+                f"Volume: {volume:.2f}\n"
+                f"Status: routing through execution guardrails"
+            )
+            return self.send_telegram_message(reply)
+        if parsed.get("kind") == "invalid":
+            return self.send_telegram_message(f"⚠️ {parsed.get('reason', 'Invalid command')}")
+
+        return self.send_telegram_message("🪄 Unknown command. Send /help to see the deck.")
+
+    def _send_runtime_alert(self, event_type: str, symbol: str, details: dict | None = None) -> bool:
+        """Send a lightweight runtime alert to Discord or Telegram when configured."""
+        if not self.webhook_alerts_enabled:
+            return False
+        if not self.discord_webhook_url and not (self.telegram_bot_token and self.telegram_chat_id):
+            return False
+
+        details = details or {}
+        action = str(details.get("action") or "").upper() or "TRADE"
+        volume = details.get("volume") or details.get("lot_size") or ""
+        risk = details.get("risk") or ""
+        if event_type == "entry":
+            text = f"🟢 Entry {symbol} {action} vol={volume} risk={risk}".strip()
+        elif event_type == "management":
+            text = f"🟡 Management {symbol} {action} {details.get('reason', 'update')}".strip()
+        else:
+            text = f"⚡ {event_type.title()} {symbol}"
+
+        if self.discord_webhook_url:
+            payload = json.dumps({"content": text}).encode("utf-8")
+            request = urllib.request.Request(
+                self.discord_webhook_url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                urllib.request.urlopen(request, timeout=5)
+                return True
+            except TypeError:
+                urllib.request.urlopen(request)
+                return True
+            except Exception as exc:
+                logger.warning(f"Discord alert failed: {exc}")
+
+        if self.telegram_bot_token and self.telegram_chat_id:
+            return self.send_telegram_message(text)
+
+        return False
+
     def _can_trade(self):
         """CRITICAL FIX: Determine if new trades are allowed with equity validation"""
         # Check cooldown
@@ -878,7 +1038,7 @@ class TradingEngine:
             return False, "Account liquidated - stopping engine"
 
         loss_brake = self._get_loss_brake_state(equity)
-        if loss_brake.get("blocked"):
+        if self.daily_loss_brake_enabled and loss_brake.get("blocked"):
             reason = loss_brake.get("reason", "Daily loss brake active")
             logger.warning(f"Loss brake blocking new trade: {reason}")
             return False, reason
@@ -927,7 +1087,7 @@ class TradingEngine:
             return False, "Account liquidated - stopping engine"
 
         loss_brake = self._get_loss_brake_state(equity)
-        if loss_brake.get("blocked"):
+        if self.daily_loss_brake_enabled and loss_brake.get("blocked"):
             reason = loss_brake.get("reason", "Daily loss brake active")
             logger.warning(f"Loss brake blocking pending orders: {reason}")
             return False, reason
@@ -1432,6 +1592,67 @@ class TradingEngine:
             profile["asset_class"] = "DISABLED"
         return profile
 
+    def _symbol_performance_profile(self, symbol: str | None) -> dict:
+        normalized = str(symbol or "").strip().upper()
+        profiles = {
+            "GBPUSD": {
+                "performance_class": "strong",
+                "min_predictive_probability_for_trade": 0.55,
+                "conviction_bias": 0.00,
+                "allow_aggressive_override": True,
+                "allow_early_entry_override": True,
+            },
+            "NZDUSD": {
+                "performance_class": "neutral",
+                "min_predictive_probability_for_trade": 0.58,
+                "conviction_bias": 0.04,
+                "allow_aggressive_override": False,
+                "allow_early_entry_override": True,
+            },
+            "USDCAD": {
+                "performance_class": "neutral",
+                "min_predictive_probability_for_trade": 0.58,
+                "conviction_bias": 0.04,
+                "allow_aggressive_override": False,
+                "allow_early_entry_override": True,
+            },
+        }
+        defaults = {
+            "performance_class": "weak",
+            "min_predictive_probability_for_trade": 0.62,
+            "conviction_bias": 0.10,
+            "allow_aggressive_override": False,
+            "allow_early_entry_override": False,
+        }
+        profile = {**defaults, **profiles.get(normalized, {})}
+        profile["symbol"] = normalized
+        return profile
+
+    def _predictive_execution_allowed(self, signal: dict, ensemble_decision: dict) -> tuple:
+        """Compatibility shim: decide whether predictive probability allows execution.
+
+        This repo removed the predictive engine from runtime; tests and some
+        legacy code still call this helper. Implement a conservative check
+        based on per-symbol profiles and the provided predictive probability.
+        """
+        try:
+            prob = float(ensemble_decision.get("predictive_probability") if ensemble_decision is not None else None)
+        except Exception:
+            prob = None
+
+        if prob is None:
+            # No predictive signal available — treat as neutral/pass
+            return True, "Predictive probability missing — neutral by default"
+
+        # Determine threshold from symbol profile
+        symbol = (signal.get("symbol") or "").upper() if signal else ""
+        profile = self._symbol_performance_profile(symbol)
+        threshold = float(profile.get("min_predictive_probability_for_trade", 0.62))
+
+        if prob < threshold:
+            return False, f"Predictive model too bearish (p={prob:.3f}) threshold={threshold:.3f}"
+        return True, f"Predictive model check passed (p={prob:.3f}) threshold={threshold:.3f}"
+
     def _get_symbol_min_profit_pips(self, symbol: str, signal: dict | None = None) -> float:
         override = os.getenv(self._env_key_for_symbol("MIN_PROFIT_PIPS", symbol))
         if override is not None:
@@ -1548,6 +1769,9 @@ class TradingEngine:
 
     def _normalize_signal_levels_to_rr(self, signal: dict) -> tuple[bool, str]:
         """Keep strategy SL, then derive TP from the configured target R multiple."""
+        if signal.get("rr_normalized") and signal.get("target_r") is not None:
+            return True, f"TP/SL already normalized to {float(signal.get('target_r')):.2f}R"
+
         action = str(signal.get("action", "")).upper()
         entry = signal.get("entry")
         sl = signal.get("sl")
@@ -1600,6 +1824,23 @@ class TradingEngine:
             return False, spread.get("description", "Spread unsafe")
         return True, spread.get("description", "Spread safe")
 
+    def _get_signal_safety_state(self, signal: dict) -> dict:
+        cached = signal.get("_signal_safety_state")
+        if cached is not None:
+            return cached
+
+        spread_ok, spread_reason = self._get_spread_safety(signal)
+        drift_ok, drift_reason = self._is_price_near_entry(signal)
+        state = {
+            "spread_ok": spread_ok,
+            "spread_reason": spread_reason,
+            "drift_ok": drift_ok,
+            "drift_reason": drift_reason,
+            "ok": spread_ok and drift_ok,
+        }
+        signal["_signal_safety_state"] = state
+        return state
+
     def _is_price_near_entry(self, signal: dict) -> tuple[bool, str]:
         entry = signal.get("entry")
         sl = signal.get("sl")
@@ -1642,8 +1883,11 @@ class TradingEngine:
         archetype = setup.get("archetype")
         horizon_profile = self._horizon_execution_profile(signal)
         horizon_name = horizon_profile.get("name", "INTRADAY")
-        spread_ok, spread_reason = self._get_spread_safety(signal)
-        drift_ok, drift_reason = self._is_price_near_entry(signal)
+        safety = self._get_signal_safety_state(signal)
+        spread_ok = safety["spread_ok"]
+        drift_ok = safety["drift_ok"]
+        spread_reason = safety["spread_reason"]
+        drift_reason = safety["drift_reason"]
 
         if not spread_ok:
             return False, spread_reason
@@ -1797,8 +2041,11 @@ class TradingEngine:
         session = signal.get("session_bias") or (signal.get("setup_score") or {}).get("session_bias") or {}
         session_score = float(session.get("score", 0.0) or 0.0)
         expected_r = self._calculate_expected_r(signal) or 0.0
-        spread_ok, spread_reason = self._get_spread_safety(signal)
-        drift_ok, drift_reason = self._is_price_near_entry(signal)
+        safety = self._get_signal_safety_state(signal)
+        spread_ok = safety["spread_ok"]
+        spread_reason = safety["spread_reason"]
+        drift_ok = safety["drift_ok"]
+        drift_reason = safety["drift_reason"]
         mtf_ok, mtf_reason, mtf_score = self._mtf_execution_allowed(signal)
 
         primary_structure = bool({"liquidity_sweep", "mss", "displacement", "ob_fvg", "false_move"}.intersection(passed))
@@ -1896,7 +2143,6 @@ class TradingEngine:
             c_grade_structure_ok = False
         if not horizon_profile.get("allow_c_grade", False):
             c_scalp_ok = False
-            c_grade_structure_ok = False
 
         if self.block_context_watch_trades and archetype == "Context Watch":
             return False, "Professional gate: Context Watch is watch-only"
@@ -2059,14 +2305,19 @@ class TradingEngine:
 
             min_profit_pips = self._get_symbol_min_profit_pips(symbol, signal)
             min_expected_r = self._get_required_r(signal)
-            spread_ok, spread_reason = self._get_spread_safety(signal)
+            safety = self._get_signal_safety_state(signal)
+            spread_ok = safety["spread_ok"]
+            spread_reason = safety["spread_reason"]
 
             if not spread_ok:
                 return False, spread_reason
-            if reward_pips < min_profit_pips:
-                return False, f"Reward too small ({reward_pips:.1f}p < {min_profit_pips:.1f}p)"
-            if expected_r < min_expected_r:
-                return False, f"R:R too low ({expected_r:.2f}R < {min_expected_r:.2f}R)"
+
+            min_required_reward_pips = max(min_profit_pips, min_expected_r * risk_pips)
+            if reward_pips < min_required_reward_pips:
+                return False, (
+                    f"Reward too small ({reward_pips:.1f}p < {min_required_reward_pips:.1f}p; "
+                    f"min_profit={min_profit_pips:.1f}p, min_rr={min_expected_r:.2f}R)"
+                )
             if action == "BUY" and not (sl < entry < tp):
                 return False, "BUY levels invalid; expected SL < entry < TP"
             if action == "SELL" and not (tp < entry < sl):
@@ -2280,9 +2531,6 @@ class TradingEngine:
         if self.partial_tp_enabled:
             management_value += 4
             management_notes.append("partial TP")
-        if self.reverse_profit_exit_enabled:
-            management_value += 4
-            management_notes.append("reverse exit")
         if self.professional_gate_enabled:
             management_value += 5
             management_notes.append("professional gate")
@@ -2334,6 +2582,12 @@ class TradingEngine:
             symbol = item.get("symbol")
             trade = self.active_trades.get(symbol, {}) if symbol else {}
             profile = self._management_profile(symbol, trade=trade)
+            execution_type = trade.get("execution_type") or trade.get("type")
+            entry_mode = None
+            if execution_type == "market":
+                entry_mode = "market"
+            elif execution_type == "pending":
+                entry_mode = "pending"
             item["trade_state"] = {
                 "status": "ACTIVE" if symbol in self.active_trades else "EXTERNAL",
                 "trade_style": trade.get("trade_style"),
@@ -2341,12 +2595,13 @@ class TradingEngine:
                 "symbol_profile": profile.get("symbol_profile"),
                 "horizon_profile": profile.get("horizon_profile"),
                 "management_profile": profile.get("name"),
+                "execution_type": execution_type,
+                "entry_mode": entry_mode,
                 "partial_tp_taken": bool(trade.get("partial_tp_taken")),
                 "partial_tp_lock_sl": trade.get("partial_tp_lock_sl"),
                 "partial_runner_tp": trade.get("partial_runner_tp"),
                 "partial_runner_tp_at": trade.get("partial_runner_tp_at"),
                 "opposing_signal_exit": trade.get("opposing_signal_exit"),
-                "reverse_exit_done": bool(trade.get("reverse_exit_done")),
                 "news_ladder_count": len(trade.get("news_ladder_addons") or []),
                 "news_move": trade.get("news_move"),
                 "false_move": trade.get("false_move"),
@@ -2373,10 +2628,6 @@ class TradingEngine:
             "trailing_stop_min_step_pips": getattr(self, "trailing_stop_min_step_pips", 5.0),
             "partial_tp_trigger_r": getattr(self, "partial_tp_trigger_r", 0.75),
             "partial_tp_lock_pips": getattr(self, "partial_tp_lock_pips", 10.0),
-            "reverse_profit_min_r": getattr(self, "reverse_profit_min_r", 1.20),
-            "reverse_profit_giveback_pct": getattr(self, "reverse_profit_giveback_pct", 0.45),
-            "reverse_profit_close_pct": getattr(self, "reverse_profit_close_pct", 0.5),
-            "reverse_after_partial_lock_r": getattr(self, "reverse_after_partial_lock_r", 0.20),
             "max_adverse_r": getattr(self, "max_adverse_r", 0.60),
         }
 
@@ -2387,11 +2638,9 @@ class TradingEngine:
                 "name": "JPY",
                 "trailing_stop_trigger_pct": 0.60,
                 "trailing_stop_lock_pips": 10.0,
-                "trailing_stop_step_pct": 0.55,
+                "trailing_stop_step_pct": 0.60,
                 "trailing_stop_min_step_pips": 5.0,
                 "partial_tp_trigger_r": 0.85,
-                "reverse_profit_min_r": 1.35,
-                "reverse_profit_giveback_pct": 0.48,
             },
             "XAU": {
                 "name": "XAU",
@@ -2400,9 +2649,6 @@ class TradingEngine:
                 "trailing_stop_step_pct": 0.65,
                 "trailing_stop_min_step_pips": 10.0,
                 "partial_tp_trigger_r": 0.90,
-                "reverse_profit_min_r": 1.50,
-                "reverse_profit_giveback_pct": 0.50,
-                "reverse_after_partial_lock_r": 0.25,
             },
         }
 
@@ -2443,8 +2689,6 @@ class TradingEngine:
                 "trailing_stop_trigger_pct": self._env_float("TRAILING_STOP_TRIGGER_PCT_METAL", 0.65),
                 "trailing_stop_step_pct": self._env_float("TRAILING_STOP_STEP_PCT_METAL", 0.65),
                 "trailing_stop_min_step_pips": self._env_float("TRAILING_STOP_MIN_STEP_PIPS_METAL", 10.0),
-                "reverse_profit_min_r": self._env_float("REVERSE_PROFIT_MIN_R_METAL", 1.50),
-                "reverse_profit_giveback_pct": self._env_float("REVERSE_PROFIT_GIVEBACK_PCT_METAL", 0.50),
                 "max_adverse_r": self._env_float("MAX_ADVERSE_R_METAL", 0.90),
             },
             "STOCK": {
@@ -2452,8 +2696,6 @@ class TradingEngine:
                 "partial_tp_trigger_r": self._env_float("PARTIAL_TP_TRIGGER_R_STOCK", 1.00),
                 "trailing_stop_trigger_pct": self._env_float("TRAILING_STOP_TRIGGER_PCT_STOCK", 0.75),
                 "trailing_stop_step_pct": self._env_float("TRAILING_STOP_STEP_PCT_STOCK", 0.70),
-                "reverse_profit_min_r": self._env_float("REVERSE_PROFIT_MIN_R_STOCK", 1.80),
-                "reverse_profit_giveback_pct": self._env_float("REVERSE_PROFIT_GIVEBACK_PCT_STOCK", 0.55),
                 "max_adverse_r": self._env_float("MAX_ADVERSE_R_STOCK", 0.80),
                 "allow_news_ladder": False,
             },
@@ -2523,9 +2765,6 @@ class TradingEngine:
             "SCALP": {
                 "name": "SCALP",
                 "partial_tp_trigger_r": 0.60,
-                "reverse_profit_min_r": 1.00,
-                "reverse_profit_giveback_pct": 0.35,
-                "reverse_after_partial_lock_r": 0.12,
                 "trailing_stop_trigger_pct": 0.50,
                 "trailing_stop_step_pct": 0.45,
                 "trailing_stop_min_step_pips": 3.0,
@@ -2535,8 +2774,6 @@ class TradingEngine:
             "INTRADAY": {
                 "name": "INTRADAY",
                 "partial_tp_trigger_r": 0.75,
-                "reverse_profit_min_r": 1.20,
-                "reverse_profit_giveback_pct": 0.45,
                 "trailing_stop_trigger_pct": 0.55,
                 "trailing_stop_step_pct": 0.50,
                 "trailing_stop_min_step_pips": 5.0,
@@ -2546,9 +2783,6 @@ class TradingEngine:
             "SWING": {
                 "name": "SWING",
                 "partial_tp_trigger_r": 1.00,
-                "reverse_profit_min_r": 1.80,
-                "reverse_profit_giveback_pct": 0.55,
-                "reverse_after_partial_lock_r": 0.30,
                 "trailing_stop_trigger_pct": 0.70,
                 "trailing_stop_step_pct": 0.70,
                 "trailing_stop_min_step_pips": 8.0,
@@ -2567,9 +2801,9 @@ class TradingEngine:
         merged = dict(symbol_profile)
         symbol_name = symbol_profile.get("name", "DEFAULT")
         instrument_name = instrument_profile.get("name", "DISABLED")
-        if instrument_name != "DISABLED":
-            merged.update({k: v for k, v in instrument_profile.items() if k != "name"})
         horizon_name = horizon_profile.get("name", "DISABLED")
+        if horizon_name != "DISABLED" and instrument_name != "DISABLED":
+            merged.update({k: v for k, v in instrument_profile.items() if k != "name"})
         if horizon_name != "DISABLED":
             merged.update({k: v for k, v in horizon_profile.items() if k != "name"})
         name_parts = [symbol_name]
@@ -2937,15 +3171,6 @@ class TradingEngine:
 
     def _symbol_allowed_for_execution(self, symbol: str) -> tuple[bool, str]:
         """Allow broad scanning while limiting live MT5 execution to a curated symbol set."""
-        if self.small_account_active:
-            instrument_class = self._instrument_class(symbol)
-            if instrument_class == "METAL" and not self.small_account_allow_metals:
-                return False, f"Small Account Mode blocks metal execution for {symbol}"
-            if instrument_class == "CRYPTO" and not self.small_account_allow_crypto:
-                return False, f"Small Account Mode blocks crypto execution for {symbol}"
-            if instrument_class == "STOCK" and not self.small_account_allow_stocks:
-                return False, f"Small Account Mode blocks stock execution for {symbol}"
-
         execution_symbols = self._refresh_execution_symbols_from_env()
         if not execution_symbols:
             return True, "No execution-symbol allowlist configured"
@@ -3049,19 +3274,27 @@ class TradingEngine:
             if not signals:
                 self.add_logic(None, "No FVG signals detected this cycle", level="info")
 
-            # store recent signals (keep last 20)
+            # store recent signals (keep last 20) and pattern history for decision learning
             for signal in signals:
                 self.recent_signals.append(signal)
-            self.recent_signals = self.recent_signals[-20:]
-
-            for signal in signals:
-                symbol = signal.get("symbol")
-
+                self.recent_signals = self.recent_signals[-20:]
+                pattern = signal.get("forex_pattern") or {}
+                self.pattern_history.append({
+                    "timestamp": datetime.now().isoformat(),
+                    "symbol": signal.get("symbol"),
+                    "pattern": pattern.get("name"),
+                    "category": pattern.get("category"),
+                    "strength": pattern.get("strength"),
+                })
+                self.pattern_history = self.pattern_history[-200:]
                 # Timestamp and classification events
                 signal = {
                     **signal,
                     "timestamp": datetime.now().isoformat(),
                 }
+
+                # Ensure local `symbol` variable is defined for downstream logic
+                symbol = str(signal.get("symbol") or "").upper()
 
                 # Compute scalp potential rating and store signal history
                 scalp_data = self._compute_scalp_potential(signal)
@@ -3144,13 +3377,13 @@ class TradingEngine:
                             f"MTF analytic: {mtf_details.get('score', 0):.2f} - {mtf_details.get('reason', 'multi-timeframe context')}",
                             level="info",
                         )
-                    predictive_result = self.predictive_engine.predict_probability(symbol)
                     ensemble_decision = self.ensemble_decision.make_decision(
-                        analytic_result, predictive_result, signal
+                        analytic_result, {}, signal
                     )
 
                     conviction = ensemble_decision.get("conviction", 0.5)
                     decision = ensemble_decision.get("decision", "WAIT")
+                    performance = self._symbol_performance_profile(symbol)
                     confluence_score = float(signal.get("confluence_score", 0.0))
                     setup_archetype = str((signal.get("setup_score") or {}).get("archetype") or "Context Watch")
                     hard_structure_ok = self._signal_has_hard_structure(signal)
@@ -3158,9 +3391,19 @@ class TradingEngine:
                     horizon_conviction = float(horizon_profile.get("conviction_threshold", self.execution_conviction_threshold))
                     horizon_setup = float(horizon_profile.get("setup_score_threshold", self.execution_setup_score_threshold))
                     promotable_structure = hard_structure_ok and setup_archetype != "Context Watch"
+                    forex_pattern = signal.get("forex_pattern", {})
+                    pattern_name = forex_pattern.get("name", "Unknown")
+                    pattern_category = forex_pattern.get("category", "Neutral")
+                    pattern_strength = float(forex_pattern.get("strength", 0.0))
+                    if pattern_strength >= 0.65:
+                        self.add_logic(symbol, f"Forex pattern recognized: {pattern_name} ({pattern_category}) strength={pattern_strength:.2f}", level="info")
 
-                    # Use configurable conviction threshold (lowered to 0.60)
-                    if conviction < self.conviction_threshold:
+                    min_conviction = self.conviction_threshold + float(performance.get("conviction_bias", 0.0))
+                    if pattern_category == "Breakout" and performance["performance_class"] != "weak":
+                        min_conviction = max(0.0, min_conviction - 0.03)
+                    if pattern_category == "Reversal" and pattern_strength >= 0.70:
+                        min_conviction = max(0.0, min_conviction - 0.02)
+                    if conviction < min_conviction:
                         decision = "WAIT"
 
                     # Structured scalp override only. Context-only scalp ideas stay watchlist.
@@ -3184,12 +3427,48 @@ class TradingEngine:
                         ensemble_decision["reasoning"] = ensemble_decision.get("reasoning", "") + " | Structured Moderate Confidence"
 
                     # Early entry for high-confluence setups even if FVG is not perfect yet
-                    if decision != "TRADE" and promotable_structure and confluence_score >= 0.60 and conviction >= 0.25:
+                    if (
+                        decision != "TRADE"
+                        and promotable_structure
+                        and confluence_score >= 0.60
+                        and conviction >= 0.25
+                        and performance["performance_class"] != "weak"
+                    ):
                         decision = "TRADE"
                         ensemble_decision["reasoning"] = ensemble_decision.get("reasoning", "") + " | Confluence Override"
 
+                    # Forex pattern breakout override for high-confidence breakout structures
+                    if (
+                        decision != "TRADE"
+                        and promotable_structure
+                        and pattern_category == "Breakout"
+                        and pattern_strength >= 0.70
+                        and conviction >= max(0.28, min_conviction - 0.05)
+                        and performance["performance_class"] != "weak"
+                    ):
+                        decision = "TRADE"
+                        ensemble_decision["reasoning"] = ensemble_decision.get("reasoning", "") + " | Forex Breakout Pattern Override"
+
+                    # Forex pattern reversal override when price action indicates a strong reversal setup
+                    if (
+                        decision != "TRADE"
+                        and promotable_structure
+                        and pattern_category == "Reversal"
+                        and pattern_strength >= 0.75
+                        and conviction >= max(0.30, min_conviction - 0.05)
+                        and performance["performance_class"] != "weak"
+                    ):
+                        decision = "TRADE"
+                        ensemble_decision["reasoning"] = ensemble_decision.get("reasoning", "") + " | Forex Reversal Pattern Override"
+
                     # High probability signal entry
-                    if decision != "TRADE" and promotable_structure and scalp_data.get("score", 0) >= 0.75 and conviction >= 0.25:
+                    if (
+                        decision != "TRADE"
+                        and promotable_structure
+                        and scalp_data.get("score", 0) >= 0.75
+                        and conviction >= 0.25
+                        and performance.get("allow_aggressive_override", False)
+                    ):
                         decision = "TRADE"
                         ensemble_decision["reasoning"] = ensemble_decision.get("reasoning", "") + " | Aggressive High-Probability Entry"
 
@@ -3198,6 +3477,7 @@ class TradingEngine:
                         self.early_entry_enabled
                         and decision != "TRADE"
                         and setup_value >= self.early_entry_min_score
+                        and performance.get("allow_early_entry_override", False)
                     ):
                         decision = "TRADE"
                         ensemble_decision["reasoning"] = ensemble_decision.get("reasoning", "") + f" | Early Score Override {setup_value:.2f}"
@@ -3439,6 +3719,14 @@ class TradingEngine:
                     self.favorable_signals[-1]["status_reason"] = broker_guard_reason
                     continue
 
+                basket_ok, basket_reason = self._guard_currency_basket_exposure(signal)
+                if not basket_ok:
+                    self.log_rejection(symbol, basket_reason, {"stage": "CURRENCY_BASKET_GUARD"})
+                    self.add_logic(symbol, f"Signal held by currency basket guard: {basket_reason}", level="warning")
+                    self.favorable_signals[-1]["status"] = "basket_guard"
+                    self.favorable_signals[-1]["status_reason"] = basket_reason
+                    continue
+
                 self.execute_trade(signal, volume, use_market_execution=use_market_execution)
         except Exception as e:
             logger.exception(f"Scan error: {e}")
@@ -3483,6 +3771,14 @@ class TradingEngine:
                 self.add_logic(symbol, f"Trade execution blocked by broker exposure guard: {broker_guard_reason}", level="warning")
                 self._release_signal_execution(execution_key, broker_guard_reason)
                 self.last_execution_error = broker_guard_reason
+                return
+
+            basket_ok, basket_reason = self._guard_currency_basket_exposure(signal)
+            if not basket_ok:
+                self.log_rejection(symbol, basket_reason)
+                self.add_logic(symbol, f"Trade execution blocked by currency basket guard: {basket_reason}", level="warning")
+                self._release_signal_execution(execution_key, basket_reason)
+                self.last_execution_error = basket_reason
                 return
 
             if use_market_execution:
@@ -3534,7 +3830,6 @@ class TradingEngine:
                     "initial_volume": volume,
                     "news_ladder_addons": [],
                     "partial_tp_taken": False,
-                    "reverse_exit_done": False,
                     "max_favorable_r": 0.0,
                     "max_favorable_profit": 0.0,
                     "max_favorable_price": entry,
@@ -3556,6 +3851,15 @@ class TradingEngine:
                     "news_move": signal.get("news_move"),
                 })
                 logger.info(f"{execution_type.capitalize()} order placed: {symbol} {action} (vol={volume:.2f}, risk=${risk_amount:.2f})")
+                self._send_runtime_alert(
+                    "entry",
+                    symbol,
+                    {
+                        "action": action,
+                        "volume": volume,
+                        "risk": f"${risk_amount:.2f}",
+                    },
+                )
                 self._register_trade_open(symbol)
                 if self.favorable_signals:
                     self.favorable_signals[-1]["status"] = "executed"
@@ -3683,8 +3987,6 @@ class TradingEngine:
                     if self._apply_partial_take_profit(pos):
                         continue
                     self._apply_news_ladder(pos)
-                    if self._apply_reverse_profit_exit(pos):
-                        continue
                     self._apply_trailing_stop(pos)
                     self._apply_trailing_take_profit(pos)
         except Exception as e:
@@ -3974,7 +4276,11 @@ class TradingEngine:
             pip_size = self._get_pip_size(symbol) or 0.0
             min_distance = max(self._symbol_min_stop_distance(symbol), pip_size)
             if side == "BUY":
+                if desired_sl > current - min_distance:
+                    return entry
                 return max(entry, min(desired_sl, current - min_distance))
+            if desired_sl < current + min_distance:
+                return entry
             return min(entry, max(desired_sl, current + min_distance))
         except Exception:
             return desired_sl
@@ -4457,59 +4763,6 @@ class TradingEngine:
             "news_mode": mode,
         })
 
-    def _apply_reverse_profit_exit(self, pos):
-        """Close green trades when price reverses sharply from max favorable excursion."""
-        if not self.reverse_profit_exit_enabled:
-            return False
-        symbol = pos.get("symbol")
-        trade = self.active_trades.get(symbol)
-        if not trade or trade.get("reverse_exit_done"):
-            return False
-
-        r_now = self._position_r_multiple(pos)
-        if r_now is None:
-            return False
-        profile = self._management_profile(symbol, trade=trade)
-        max_r = float(trade.get("max_favorable_r") or 0)
-        reverse_min_r = float(profile.get("reverse_profit_min_r", self.reverse_profit_min_r))
-        if max_r < reverse_min_r:
-            return False
-
-        giveback = max_r - r_now
-        giveback_pct = float(profile.get("reverse_profit_giveback_pct", self.reverse_profit_giveback_pct))
-        giveback_trigger = max_r * max(0.0, min(1.0, giveback_pct))
-        partial_taken = bool(trade.get("partial_tp_taken"))
-        partial_lock_r = float(profile.get("reverse_after_partial_lock_r", self.reverse_after_partial_lock_r))
-        near_breakeven_after_partial = partial_taken and r_now <= partial_lock_r and r_now > 0
-        reversed_from_peak = r_now > 0 and giveback >= giveback_trigger
-
-        if not (reversed_from_peak or near_breakeven_after_partial):
-            return False
-
-        profile_close_pct = float(profile.get("reverse_profit_close_pct", self.reverse_profit_close_pct))
-        close_pct = profile_close_pct if partial_taken else min(profile_close_pct, 0.5)
-        self._set_reversal_breakeven_at_entry(pos, "REVERSE_PROFIT_EXIT")
-        if self._close_position_fraction(pos, close_pct, "REVERSE_PROFIT_EXIT"):
-            trade["reverse_exit_done"] = True
-            trade["reverse_exit_at"] = datetime.now().isoformat()
-            trade["reverse_exit_r"] = r_now
-            self.logger._save_log({
-                "timestamp": datetime.now().isoformat(),
-                "event": "REVERSE_PROFIT_EXIT",
-                "symbol": symbol,
-                "r": r_now,
-                "max_r": max_r,
-                "giveback_r": giveback,
-                "profile": profile.get("name"),
-                "symbol_profile": profile.get("symbol_profile"),
-                "horizon_profile": profile.get("horizon_profile"),
-                "trigger_r": reverse_min_r,
-                "giveback_pct": giveback_pct,
-                "close_pct": close_pct,
-                "profit": pos.get("profit"),
-            })
-            return True
-        return False
 
     def _apply_trailing_stop(self, pos):
         """Lock profit after trigger, then step-trail as price keeps moving favorably."""
@@ -4714,22 +4967,14 @@ class TradingEngine:
                     "enabled": self.dynamic_account_profile_enabled,
                     "name": self.account_profile_name,
                     "equity": self.account_profile_equity,
-                    "last_applied_at": self.dynamic_profile_last_applied_at,
                     "volume": self.volume,
                     "min_execution_grade": self.min_execution_grade,
                     "min_trade_readiness_score": self.min_trade_readiness_score,
                     "min_professional_setup_score": self.min_professional_score,
                     "market_execution_score_threshold": self.market_execution_score_threshold,
                     "max_auto_min_lot": self.max_auto_min_lot,
-                    "small_account_mode": {
-                        "enabled": self.small_account_mode_enabled,
-                        "active": self.small_account_active,
-                        "threshold": self.small_account_threshold,
-                        "allow_metals": self.small_account_allow_metals,
-                        "allow_crypto": self.small_account_allow_crypto,
-                        "allow_stocks": self.small_account_allow_stocks,
-                    },
                 },
+
                 "account": account,
                 "balance": account.get("balance") if account else None,
                 "equity": equity,
@@ -4815,11 +5060,6 @@ class TradingEngine:
                     "first_profit_breakeven_trigger_r_scalp": self.first_profit_breakeven_trigger_r_scalp,
                     "max_adverse_exit": self.max_adverse_exit_enabled,
                     "max_adverse_r": self.max_adverse_r,
-                    "reverse_profit_exit": self.reverse_profit_exit_enabled,
-                    "reverse_profit_min_r": self.reverse_profit_min_r,
-                    "reverse_profit_giveback_pct": self.reverse_profit_giveback_pct,
-                    "reverse_profit_close_pct": self.reverse_profit_close_pct,
-                    "reverse_after_partial_lock_r": self.reverse_after_partial_lock_r,
                     "opposing_signal_profit_exit": self.opposing_signal_profit_exit_enabled,
                     "opposing_signal_min_r": self.opposing_signal_min_r,
                     "opposing_signal_min_score": self.opposing_signal_min_score,

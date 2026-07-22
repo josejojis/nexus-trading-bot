@@ -1,9 +1,11 @@
 """Flask Dashboard API"""
 
+import json
 import logging
 import os
 import time
 import threading
+from datetime import datetime
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -17,10 +19,37 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 
 load_dotenv(ENV_PATH)
+
+# Configure logging with visible format
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
-logging.basicConfig(level=log_level)
+log_format = logging.Formatter(
+    fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(log_level)
+
+# Remove any existing handlers
+for handler in root_logger.handlers[:]:
+    root_logger.removeHandler(handler)
+
+# Add console handler with formatter
+console_handler = logging.StreamHandler()
+console_handler.setLevel(log_level)
+console_handler.setFormatter(log_format)
+root_logger.addHandler(console_handler)
+
+# Set werkzeug to WARNING to reduce noise
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
+logging.getLogger("socketio").setLevel(logging.WARNING)
+logging.getLogger("engineio").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
+logger.info("=" * 60)
+logger.info("NEXUS TRADING BOT - Starting Application")
+logger.info("=" * 60)
 
 app = Flask(__name__, template_folder="templates", static_folder="static")
 app.config["TEMPLATES_AUTO_RELOAD"] = True
@@ -32,11 +61,22 @@ socketio = SocketIO(app, cors_allowed_origins='*')
 engine: Optional[TradingEngine] = None
 _realtime_thread: Optional[threading.Thread] = None
 _engine_thread: Optional[threading.Thread] = None
+_backtest_thread: Optional[threading.Thread] = None
 _engine_lock = threading.RLock()  # CRITICAL: Prevent race conditions on global engine
+_backtest_lock = threading.RLock()
 _status_cache_lock = threading.RLock()
 _status_cache = {
     "payload": None,
     "updated_at": 0.0,
+}
+# Advice/predictive endpoints removed: predictive engine logic disabled
+_backtest_status = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "message": None,
+    "error": None,
+    "report_path": os.getenv("BACKTEST_REPORT_PATH", "backtest_report.json"),
 }
 _STATUS_CACHE_SECONDS = float(os.getenv("DASHBOARD_STATUS_CACHE_SECONDS", "2.0"))
 
@@ -75,6 +115,56 @@ def parse_bool(value):
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() in ["1", "true", "yes", "on"]
+
+
+def _safe_backtest_snapshot():
+    with _backtest_lock:
+        return dict(_backtest_status)
+
+
+def _run_backtest_background(symbols, bars, lookahead, min_samples, report_path, retrain_on_complete=False):
+    with _backtest_lock:
+        _backtest_status.update({
+            "running": True,
+            "started_at": datetime.utcnow().isoformat(),
+            "finished_at": None,
+            "message": "Backtest running",
+            "error": None,
+            "report_path": report_path,
+        })
+
+    try:
+        import offline_backtest
+
+        # Predictive engine removed — run backtest using neutral probabilities
+        engine_for_backtest = None
+        report = offline_backtest.backtest_symbols(
+            engine_for_backtest,
+            symbols,
+            bars=bars,
+            lookahead=lookahead,
+            min_samples=min_samples,
+        )
+
+        os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
+        with open(report_path, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=2)
+
+        with _backtest_lock:
+            _backtest_status.update({
+                "running": False,
+                "finished_at": datetime.utcnow().isoformat(),
+                "message": "Backtest completed successfully",
+                "error": None,
+            })
+    except Exception as exc:
+        with _backtest_lock:
+            _backtest_status.update({
+                "running": False,
+                "finished_at": datetime.utcnow().isoformat(),
+                "message": "Backtest failed",
+                "error": str(exc),
+            })
 
 
 def read_env_file(path=ENV_PATH):
@@ -136,70 +226,78 @@ def index():
 def api_start():
     global engine, _engine_thread
     with _engine_lock:  # CRITICAL: Prevent race condition on engine creation
-        try:
-            if engine and engine.is_running:
-                return jsonify({"status": "error", "message": "Bot already running"}), 400
-
-            payload = request.json or {}
-
-            engine = TradingEngine()
-            engine.rule_config = {"ema": False, "volume": False, "po3": False}
-
-            # CRITICAL FIX: Validate and sanitize symbols
-            if "symbols" in payload:
-                symbols, error = validate_symbols_param(payload["symbols"])
-                if error:
-                    return jsonify({"status": "error", "message": f"Invalid symbols: {error}"}), 400
-                engine.symbols = symbols
-
-            # CRITICAL FIX: Validate volume parameter
-            if "volume" in payload:
-                volume, error = validate_float_param(payload["volume"], "volume", min_val=0.001, max_val=10)
-                if error:
-                    return jsonify({"status": "error", "message": error}), 400
-                if volume is not None:
-                    engine.volume = volume
-
-            engine.position_sizing_mode = "fixed"
-            engine.risk_pct = 0.0
-
-            # CRITICAL FIX: Validate max exposure percentage parameter
-            if "max_exposure_pct" in payload:
-                exposure, error = validate_float_param(payload["max_exposure_pct"], "max_exposure_pct", min_val=0.01, max_val=1)
-                if error:
-                    return jsonify({"status": "error", "message": error}), 400
-                if exposure is not None:
-                    engine.max_exposure_pct = exposure
-
-            if not engine.connect():
-                engine = None
-                return jsonify({"status": "error", "message": "MT5 connection failed"}), 500
-
-            _engine_thread = threading.Thread(target=engine.start, daemon=True)
-            _engine_thread.start()
-            _start_realtime_thread()
+        payload = request.json or {}
+        success, message = _start_engine(payload)
+        if success:
             return jsonify({"status": "success", "message": "Bot started"})
-        except Exception as e:
-            logger.error(f"Error starting bot: {e}", exc_info=True)
-            return jsonify({"status": "error", "message": str(e)}), 500
+
+        status_code = 400 if message and message.startswith("Invalid") else 500
+        return jsonify({"status": "error", "message": message or "Failed to start bot"}), status_code
 
 
 @app.route("/api/bot/stop", methods=["POST"])
 def api_stop():
-    global engine, _engine_thread
     with _engine_lock:  # CRITICAL: Prevent race condition on engine shutdown
-        try:
-            if engine:
-                engine.stop()
-                engine.disconnect()
-                if _engine_thread and _engine_thread.is_alive():
-                    _engine_thread.join(timeout=2)
-                engine = None
-                _engine_thread = None
-                return jsonify({"status": "success", "message": "Bot stopped"})
-            return jsonify({"status": "error", "message": "Bot not running"}), 400
-        except Exception as e:
-            return jsonify({"status": "error", "message": str(e)}), 500
+        success, message = _stop_engine()
+        if success:
+            return jsonify({"status": "success", "message": "Bot stopped"})
+        return jsonify({"status": "error", "message": message or "Bot not running"}), 400
+
+
+@app.route("/api/bot/retrain", methods=["POST"])
+@app.route("/api/bot/retrain", methods=["POST"])
+def api_retrain():
+    # Predictive retraining removed from this deployment.
+    return jsonify({"status": "error", "message": "Predictive engine removed"}), 410
+
+
+@app.route("/api/telegram/test", methods=["POST"])
+def api_send_telegram_test():
+    global engine
+    payload = request.json or {}
+    message = str(payload.get("message") or "🧪 Telegram test from trading bot").strip()
+
+    if engine is None:
+        return jsonify({"status": "error", "message": "Bot engine is not running"}), 400
+
+    ok = engine.send_telegram_message(message)
+    if ok:
+        return jsonify({"status": "success", "message": "Telegram message sent"})
+    return jsonify({"status": "error", "message": "Telegram message not sent"}), 400
+
+
+@app.route("/api/telegram/command", methods=["POST"])
+def api_handle_telegram_command():
+    global engine
+    payload = request.json or {}
+    text = str(payload.get("text") or "").strip()
+    chat_id = payload.get("chat_id")
+
+    if engine is None:
+        return jsonify({"status": "error", "message": "Bot engine is not running"}), 400
+
+    ok = engine._handle_telegram_command(text, chat_id)
+    if ok:
+        return jsonify({"status": "success", "message": "Telegram command handled"})
+    return jsonify({"status": "error", "message": "Telegram command failed"}), 400
+
+
+@app.route("/api/advice", methods=["GET"])
+@app.route("/api/advice", methods=["GET"])
+def api_advice_removed():
+    return jsonify({"status": "error", "message": "Predictive advice API removed"}), 410
+
+
+@app.route("/api/advice/batch", methods=["GET", "POST"])
+@app.route("/api/advice/batch", methods=["GET", "POST"])
+def api_advice_batch_removed():
+    return jsonify({"status": "error", "message": "Predictive advice API removed"}), 410
+
+
+@app.route("/api/advice/history", methods=["GET"])
+@app.route("/api/advice/history", methods=["GET"])
+def api_advice_history_removed():
+    return jsonify({"status": "error", "message": "Predictive advice API removed"}), 410
 
 
 def _build_logs_payload(active_engine):
@@ -229,7 +327,6 @@ def _build_logs_payload(active_engine):
         "PARTIAL_TP",
         "PARTIAL_TP_SL_LOCK",
         "PARTIAL_TP_RUNNER_TP",
-        "REVERSE_PROFIT_EXIT",
         "MAX_ADVERSE_EXIT",
         "NEWS_LADDER_ADDON",
         "REVERSAL_SHOCK_GUARD",
@@ -378,6 +475,106 @@ def _start_realtime_thread():
     _realtime_thread.start()
 
 
+def _start_engine(payload):
+    global engine, _engine_thread
+
+    if engine and engine.is_running:
+        return False, "Bot already running"
+
+    try:
+        engine = TradingEngine()
+        engine.rule_config = {"ema": False, "volume": False, "po3": False}
+
+        if "symbols" in payload:
+            symbols, error = validate_symbols_param(payload["symbols"])
+            if error:
+                engine = None
+                return False, f"Invalid symbols: {error}"
+            engine.symbols = symbols
+
+        if "volume" in payload:
+            volume, error = validate_float_param(payload["volume"], "volume", min_val=0.001, max_val=10)
+            if error:
+                engine = None
+                return False, error
+            engine.volume = volume
+
+        sizing_mode = None
+        if "POSITION_SIZING_MODE" in payload and payload.get("POSITION_SIZING_MODE") is not None:
+            sizing_mode = payload.get("POSITION_SIZING_MODE")
+        elif "position_sizing_mode" in payload and payload.get("position_sizing_mode") is not None:
+            sizing_mode = payload.get("position_sizing_mode")
+        elif os.getenv("POSITION_SIZING_MODE") is not None:
+            sizing_mode = os.getenv("POSITION_SIZING_MODE")
+        else:
+            sizing_mode = "fixed"
+        try:
+            mode = str(sizing_mode).strip().lower()
+            engine.position_sizing_mode = mode if mode in {"fixed", "dynamic"} else "fixed"
+        except Exception:
+            engine.position_sizing_mode = "fixed"
+
+        risk_value = None
+        if "RISK_PER_TRADE_PCT" in payload and payload.get("RISK_PER_TRADE_PCT") is not None:
+            risk_value = payload.get("RISK_PER_TRADE_PCT")
+        elif "risk_pct" in payload and payload.get("risk_pct") is not None:
+            risk_value = payload.get("risk_pct")
+        elif os.getenv("RISK_PER_TRADE_PCT") is not None:
+            risk_value = os.getenv("RISK_PER_TRADE_PCT")
+        else:
+            risk_value = "0.01"
+        try:
+            risk_pct = float(risk_value)
+            if risk_pct <= 0:
+                risk_pct = 0.01
+            elif risk_pct > 0.10:
+                risk_pct = 0.10
+            engine.risk_pct = risk_pct
+        except Exception:
+            engine.risk_pct = 0.01
+
+        if "max_exposure_pct" in payload:
+            exposure, error = validate_float_param(payload["max_exposure_pct"], "max_exposure_pct", min_val=0.01, max_val=1)
+            if error:
+                engine = None
+                return False, error
+            engine.max_exposure_pct = exposure
+
+        if not engine.connect():
+            engine = None
+            return False, "MT5 connection failed"
+
+        _engine_thread = threading.Thread(target=engine.start, daemon=True)
+        _engine_thread.start()
+        _start_realtime_thread()
+        logger.info("Bot started via API")
+        return True, None
+    except Exception as e:
+        logger.error(f"Error initializing engine: {e}", exc_info=True)
+        engine = None
+        return False, str(e)
+
+
+def _stop_engine():
+    global engine, _engine_thread
+
+    if not engine:
+        return False, "Bot not running"
+
+    try:
+        engine.stop()
+        engine.disconnect()
+        if _engine_thread and _engine_thread.is_alive():
+            _engine_thread.join(timeout=5)
+        engine = None
+        _engine_thread = None
+        logger.info("Bot stopped via API")
+        return True, None
+    except Exception as e:
+        logger.error(f"Error stopping engine: {e}", exc_info=True)
+        return False, str(e)
+
+
 @app.route("/api/bot/status", methods=["GET"])
 def api_status():
     try:
@@ -453,7 +650,7 @@ def api_status():
                 "next_scan_at": None,
                 "seconds_until_next_scan": None,
                 "last_signal_count": 0,
-                "duplicate_signal_cooldown_seconds": int(os.getenv("DUPLICATE_SIGNAL_COOLDOWN_SECONDS", 300)),
+                "duplicate_signal_cooldown_seconds": int(os.getenv("DUPLICATE_SIGNAL_COOLDOWN_SECONDS", 0)),
                 "trade_cooldown_minutes": int(os.getenv("TRADE_COOLDOWN_MINUTES", 0)),
                 "max_trades_per_symbol": int(os.getenv("MAX_TRADES_PER_SYMBOL", 1)),
                 "early_entry_enabled": os.getenv("FEATURE_EARLY_ENTRY", "true").lower() in ["true", "1", "yes"],
@@ -684,6 +881,76 @@ def api_logs():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/api/backtest-report", methods=["GET"])
+def api_backtest_report():
+    report_path = os.getenv("BACKTEST_REPORT_PATH", "backtest_report.json")
+    try:
+        if os.path.exists(report_path):
+            with open(report_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return jsonify({"status": "success", "data": data})
+        return jsonify({"status": "success", "data": None, "message": "No backtest report found"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/backtest-status", methods=["GET"])
+def api_backtest_status():
+    try:
+        return jsonify({"status": "success", "data": _safe_backtest_snapshot()})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/backtest-run", methods=["POST"])
+def api_backtest_run():
+    global _backtest_thread
+    try:
+        if _backtest_thread and _backtest_thread.is_alive():
+            return jsonify({"status": "error", "message": "Backtest already running"}), 409
+
+        payload = request.json or {}
+        symbols = payload.get("symbols")
+        if symbols is not None:
+            symbols, error = validate_symbols_param(symbols)
+            if error:
+                return jsonify({"status": "error", "message": f"Invalid symbols: {error}"}), 400
+        else:
+            raw_symbols = os.getenv("EXECUTION_SYMBOLS") or os.getenv("TRADING_SYMBOLS") or "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,EURJPY,GBPJPY,USDCHF,XAUUSD"
+            symbols = [symbol.strip().upper() for symbol in raw_symbols.split(",") if symbol.strip()]
+
+        def parse_int(value, default):
+            try:
+                return int(value)
+            except Exception:
+                return default
+
+        bars = parse_int(payload.get("bars"), int(os.getenv("BACKTEST_BARS", "2000")))
+        lookahead = parse_int(payload.get("lookahead"), int(os.getenv("BACKTEST_LOOKAHEAD", "3")))
+        min_samples = parse_int(payload.get("min_samples"), int(os.getenv("BACKTEST_MIN_SAMPLES", "200")))
+        report_path = payload.get("report") or os.getenv("BACKTEST_REPORT_PATH", "backtest_report.json")
+        retrain_on_complete = parse_bool(payload.get("retrain")) if payload.get("retrain") is not None else parse_bool(os.getenv("BACKTEST_RETRAIN_ON_RUN", "false"))
+
+        _backtest_thread = threading.Thread(
+            target=_run_backtest_background,
+            args=(symbols, bars, lookahead, min_samples, report_path, retrain_on_complete),
+            daemon=True,
+        )
+        _backtest_thread.start()
+
+        return jsonify({
+            "status": "success",
+            "message": "Backtest started",
+            "data": {
+                "symbols": symbols,
+                "report_path": report_path,
+                "retrain_on_complete": retrain_on_complete,
+            },
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/api/stats", methods=["GET"])
 def api_stats():
     try:
@@ -731,19 +998,8 @@ def api_config():
                 "TRADING_SYMBOLS": os.getenv("TRADING_SYMBOLS", ""),
                 "EXECUTION_SYMBOLS": os.getenv("EXECUTION_SYMBOLS", ""),
                 "TRADE_VOLUME": os.getenv("TRADE_VOLUME", "0.001"),
-                "POSITION_SIZING_MODE": "fixed",
-                "FEATURE_DYNAMIC_ACCOUNT_PROFILE": engine.dynamic_account_profile_enabled if engine else os.getenv("FEATURE_DYNAMIC_ACCOUNT_PROFILE", "true").lower() in ["1", "true", "yes"],
-                "FEATURE_SMALL_ACCOUNT_MODE": engine.small_account_mode_enabled if engine else os.getenv("FEATURE_SMALL_ACCOUNT_MODE", "false").lower() in ["1", "true", "yes"],
-                "SMALL_ACCOUNT_EQUITY_THRESHOLD": engine.small_account_threshold if engine else as_float(os.getenv("SMALL_ACCOUNT_EQUITY_THRESHOLD", "25"), 25),
-                "SMALL_ACCOUNT_TRADE_VOLUME": engine.small_account_trade_volume if engine else as_float(os.getenv("SMALL_ACCOUNT_TRADE_VOLUME", "0.001"), 0.001),
-                "SMALL_ACCOUNT_MAX_AUTO_MIN_LOT": engine.small_account_max_auto_min_lot if engine else as_float(os.getenv("SMALL_ACCOUNT_MAX_AUTO_MIN_LOT", "0.01"), 0.01),
-                "SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT": to_percent(engine.small_account_max_exposure_pct if engine else os.getenv("SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT", "0.01"), 1),
-                "SMALL_ACCOUNT_MAX_ACTIVE_TRADES": engine.small_account_max_active_trades if engine else int(os.getenv("SMALL_ACCOUNT_MAX_ACTIVE_TRADES", "1")),
-                "SMALL_ACCOUNT_ALLOW_METALS": engine.small_account_allow_metals if engine else os.getenv("SMALL_ACCOUNT_ALLOW_METALS", "false").lower() in ["1", "true", "yes"],
-                "SMALL_ACCOUNT_ALLOW_CRYPTO": engine.small_account_allow_crypto if engine else os.getenv("SMALL_ACCOUNT_ALLOW_CRYPTO", "false").lower() in ["1", "true", "yes"],
-                "SMALL_ACCOUNT_ALLOW_STOCKS": engine.small_account_allow_stocks if engine else os.getenv("SMALL_ACCOUNT_ALLOW_STOCKS", "false").lower() in ["1", "true", "yes"],
-                "SMALL_ACCOUNT_DISABLE_NEWS_LADDER": engine.small_account_disable_news_ladder if engine else os.getenv("SMALL_ACCOUNT_DISABLE_NEWS_LADDER", "true").lower() in ["1", "true", "yes"],
-                "SMALL_ACCOUNT_DISABLE_PENDING_ORDERS": engine.small_account_disable_pending_orders if engine else os.getenv("SMALL_ACCOUNT_DISABLE_PENDING_ORDERS", "true").lower() in ["1", "true", "yes"],
+                "POSITION_SIZING_MODE": engine.position_sizing_mode if engine else os.getenv("POSITION_SIZING_MODE", "fixed"),
+                "RISK_PER_TRADE_PCT": getattr(engine, 'risk_pct', float(os.getenv('RISK_PER_TRADE_PCT', 0.01))) if engine else float(os.getenv('RISK_PER_TRADE_PCT', 0.01)),
                 "ACCOUNT_PROFILE": {
                     "enabled": engine.dynamic_account_profile_enabled,
                     "name": engine.account_profile_name,
@@ -753,15 +1009,16 @@ def api_config():
                 "MAX_EXPOSURE_PERCENT": to_percent(exposure_value, 5),
                 "MIN_PROFIT_PIPS": os.getenv("MIN_PROFIT_PIPS", "50"),
                 "DAILY_PROFIT_CAP": to_percent(daily_cap_value, 2),
-                "FEATURE_DAILY_LOSS_BRAKE": engine.daily_loss_brake_enabled if engine else os.getenv("FEATURE_DAILY_LOSS_BRAKE", "true").lower() in ["1", "true", "yes"],
+                "DAILY_PROFIT_CAP_EXTENSION": to_percent(engine.daily_profit_cap_extension if engine else normalize_fraction(os.getenv("DAILY_PROFIT_CAP_EXTENSION", "0.0"), 0.0), 0.0),
+                "FEATURE_DAILY_LOSS_BRAKE": False,
                 "DAILY_LOSS_CAP_PERCENT": to_percent(engine.daily_loss_cap_pct if engine else os.getenv("DAILY_LOSS_CAP_PERCENT", "0.05"), 5),
                 "MAX_DAILY_LOSSES": engine.max_daily_losses if engine else int(os.getenv("MAX_DAILY_LOSSES", "100")),
                 "MAX_CONSECUTIVE_LOSSES": engine.max_consecutive_losses if engine else int(os.getenv("MAX_CONSECUTIVE_LOSSES", "30")),
-                "LOSS_COOLDOWN_MINUTES": engine.loss_cooldown_minutes if engine else int(os.getenv("LOSS_COOLDOWN_MINUTES", "60")),
+                "LOSS_COOLDOWN_MINUTES": engine.loss_cooldown_minutes if engine else int(os.getenv("LOSS_COOLDOWN_MINUTES", "0")),
                 "MAX_ACTIVE_TRADES_TOTAL": engine.max_active_trades_total if engine else int(os.getenv("MAX_ACTIVE_TRADES_TOTAL", "10")),
                 "FEATURE_CATASTROPHIC_LOSS_STOP": engine.catastrophic_loss_stop_enabled if engine else os.getenv("FEATURE_CATASTROPHIC_LOSS_STOP", "true").lower() in ["1", "true", "yes"],
                 "CATASTROPHIC_LOSS_R": engine.catastrophic_loss_r if engine else as_float(os.getenv("CATASTROPHIC_LOSS_R", "1.5"), 1.5),
-                "CATASTROPHIC_LOSS_COOLDOWN_MINUTES": engine.catastrophic_loss_cooldown_minutes if engine else int(os.getenv("CATASTROPHIC_LOSS_COOLDOWN_MINUTES", "360")),
+                "CATASTROPHIC_LOSS_COOLDOWN_MINUTES": engine.catastrophic_loss_cooldown_minutes if engine else int(os.getenv("CATASTROPHIC_LOSS_COOLDOWN_MINUTES", "0")),
                 "MIN_EXPECTED_R": engine.min_expected_r if engine else as_float(os.getenv("MIN_EXPECTED_R", "1.2"), 1.2),
                 "MIN_EXPECTED_R_SCALP": engine.min_expected_r_scalp if engine else as_float(os.getenv("MIN_EXPECTED_R_SCALP", "1.0"), 1.0),
                 "MIN_EXPECTED_R_INTRADAY": os.getenv("MIN_EXPECTED_R_INTRADAY", os.getenv("MIN_EXPECTED_R", "1.2")),
@@ -790,7 +1047,7 @@ def api_config():
                 "FEATURE_TRAILING_TAKE_PROFIT": engine.trailing_tp_enabled if engine else os.getenv("FEATURE_TRAILING_TAKE_PROFIT", "true").lower() in ["1", "true", "yes"],
                 "TRAILING_TP_TRIGGER_PCT": to_percent(engine.trailing_tp_trigger_pct if engine else os.getenv("TRAILING_TP_TRIGGER_PCT", "0.85"), 85),
                 "TRAILING_TP_EXTENSION_PCT": to_percent(engine.trailing_tp_extension_pct if engine else os.getenv("TRAILING_TP_EXTENSION_PCT", "0.5"), 50),
-                "TRAILING_TP_COOLDOWN_SECONDS": engine.trailing_tp_cooldown_seconds if engine else int(os.getenv("TRAILING_TP_COOLDOWN_SECONDS", "300")),
+                "TRAILING_TP_COOLDOWN_SECONDS": engine.trailing_tp_cooldown_seconds if engine else int(os.getenv("TRAILING_TP_COOLDOWN_SECONDS", "0")),
                 "FEATURE_PARTIAL_TP_EXTEND": engine.partial_tp_extend_enabled if engine else os.getenv("FEATURE_PARTIAL_TP_EXTEND", "true").lower() in ["1", "true", "yes"],
                 "PARTIAL_TP_EXTEND_PCT": to_percent(engine.partial_tp_extend_pct if engine else os.getenv("PARTIAL_TP_EXTEND_PCT", "0.5"), 50),
                 "FEATURE_PARTIAL_TAKE_PROFIT": engine.partial_tp_enabled if engine else os.getenv("FEATURE_PARTIAL_TAKE_PROFIT", "true").lower() in ["1", "true", "yes"],
@@ -811,11 +1068,6 @@ def api_config():
                 "MAX_ADVERSE_R_INTRADAY": os.getenv("MAX_ADVERSE_R_INTRADAY", "0.90"),
                 "MAX_ADVERSE_R_METAL": os.getenv("MAX_ADVERSE_R_METAL", "1.00"),
                 "MAX_ADVERSE_R_SWING": os.getenv("MAX_ADVERSE_R_SWING", "1.10"),
-                "FEATURE_REVERSE_PROFIT_EXIT": engine.reverse_profit_exit_enabled if engine else os.getenv("FEATURE_REVERSE_PROFIT_EXIT", "true").lower() in ["1", "true", "yes"],
-                "REVERSE_PROFIT_MIN_R": engine.reverse_profit_min_r if engine else as_float(os.getenv("REVERSE_PROFIT_MIN_R", "1.20"), 1.20),
-                "REVERSE_PROFIT_GIVEBACK_PCT": to_percent(engine.reverse_profit_giveback_pct if engine else os.getenv("REVERSE_PROFIT_GIVEBACK_PCT", "0.45"), 45),
-                "REVERSE_PROFIT_CLOSE_PCT": to_percent(engine.reverse_profit_close_pct if engine else os.getenv("REVERSE_PROFIT_CLOSE_PCT", "0.5"), 50),
-                "REVERSE_AFTER_PARTIAL_LOCK_R": engine.reverse_after_partial_lock_r if engine else as_float(os.getenv("REVERSE_AFTER_PARTIAL_LOCK_R", "0.20"), 0.20),
                 "FEATURE_SYMBOL_PROFILES": engine.symbol_profiles_enabled if engine else os.getenv("FEATURE_SYMBOL_PROFILES", "true").lower() in ["1", "true", "yes"],
                 "FEATURE_INSTRUMENT_PROFILES": engine.instrument_profiles_enabled if engine else os.getenv("FEATURE_INSTRUMENT_PROFILES", "true").lower() in ["1", "true", "yes"],
                 "MIN_PROFIT_PIPS_FOREX": os.getenv("MIN_PROFIT_PIPS_FOREX", os.getenv("MIN_PROFIT_PIPS_FX", "1.5")),
@@ -851,16 +1103,16 @@ def api_config():
                 "SIGNAL_LOCKOUT_ENABLED": engine.signal_lockout_enabled if engine else os.getenv("SIGNAL_LOCKOUT_ENABLED", "true").lower() in ["1", "true", "yes"],
                 "MAX_TRADES_PER_SYMBOL": engine.max_trades_per_symbol if engine else int(os.getenv("MAX_TRADES_PER_SYMBOL", "1")),
                 "TRADE_COOLDOWN_MINUTES": engine.trade_cooldown_minutes if engine else int(os.getenv("TRADE_COOLDOWN_MINUTES", "0")),
-                "FEATURE_COOLDOWN_OVERRIDE": engine.cooldown_override_enabled if engine else os.getenv("FEATURE_COOLDOWN_OVERRIDE", "true").lower() in ["1", "true", "yes"],
+                "FEATURE_COOLDOWN_OVERRIDE": engine.cooldown_override_enabled if engine else os.getenv("FEATURE_COOLDOWN_OVERRIDE", "false").lower() in ["1", "true", "yes"],
                 "COOLDOWN_OVERRIDE_MIN_GRADE": engine.cooldown_override_min_grade if engine else os.getenv("COOLDOWN_OVERRIDE_MIN_GRADE", "A"),
                 "COOLDOWN_OVERRIDE_MIN_SCORE": engine.cooldown_override_min_score if engine else as_float(os.getenv("COOLDOWN_OVERRIDE_MIN_SCORE", "0.78"), 0.78),
                 "COOLDOWN_OVERRIDE_MIN_CONVICTION": engine.cooldown_override_min_conviction if engine else as_float(os.getenv("COOLDOWN_OVERRIDE_MIN_CONVICTION", "0.45"), 0.45),
                 "COOLDOWN_OVERRIDE_REQUIRE_SPREAD_SAFE": engine.cooldown_override_require_spread_safe if engine else os.getenv("COOLDOWN_OVERRIDE_REQUIRE_SPREAD_SAFE", "true").lower() in ["1", "true", "yes"],
                 "COOLDOWN_OVERRIDE_REQUIRE_NEW_STRUCTURE": engine.cooldown_override_require_new_structure if engine else os.getenv("COOLDOWN_OVERRIDE_REQUIRE_NEW_STRUCTURE", "true").lower() in ["1", "true", "yes"],
-                "NO_REVENGE_COOLDOWN_SECONDS": engine.no_revenge_cooldown if engine else int(os.getenv("NO_REVENGE_COOLDOWN_SECONDS", str(24*3600))),
-                "FEATURE_REVERSAL_SHOCK_GUARD": engine.reversal_shock_guard_enabled if engine else os.getenv("FEATURE_REVERSAL_SHOCK_GUARD", "true").lower() in ["1", "true", "yes"],
-                "REVERSAL_SHOCK_COOLDOWN_MINUTES": engine.reversal_shock_cooldown_minutes if engine else int(os.getenv("REVERSAL_SHOCK_COOLDOWN_MINUTES", "30")),
-                "REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES": engine.reversal_shock_xau_cooldown_minutes if engine else int(os.getenv("REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES", "60")),
+                "NO_REVENGE_COOLDOWN_SECONDS": engine.no_revenge_cooldown if engine else int(os.getenv("NO_REVENGE_COOLDOWN_SECONDS", "0")),
+                "FEATURE_REVERSAL_SHOCK_GUARD": engine.reversal_shock_guard_enabled if engine else os.getenv("FEATURE_REVERSAL_SHOCK_GUARD", "false").lower() in ["1", "true", "yes"],
+                "REVERSAL_SHOCK_COOLDOWN_MINUTES": engine.reversal_shock_cooldown_minutes if engine else int(os.getenv("REVERSAL_SHOCK_COOLDOWN_MINUTES", "0")),
+                "REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES": engine.reversal_shock_xau_cooldown_minutes if engine else int(os.getenv("REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES", "0")),
                 "FEATURE_OPPOSING_SIGNAL_PROFIT_EXIT": engine.opposing_signal_profit_exit_enabled if engine else os.getenv("FEATURE_OPPOSING_SIGNAL_PROFIT_EXIT", "true").lower() in ["1", "true", "yes"],
                 "OPPOSING_SIGNAL_MIN_R": engine.opposing_signal_min_r if engine else as_float(os.getenv("OPPOSING_SIGNAL_MIN_R", "0.20"), 0.20),
                 "OPPOSING_SIGNAL_MIN_SCORE": engine.opposing_signal_min_score if engine else as_float(os.getenv("OPPOSING_SIGNAL_MIN_SCORE", "0.58"), 0.58),
@@ -884,8 +1136,11 @@ def api_config():
                 "NEWS_LADDER_MAX_ADDONS": engine.news_ladder_max_addons if engine else int(os.getenv("NEWS_LADDER_MAX_ADDONS", "2")),
                 "NEWS_LADDER_MIN_R": engine.news_ladder_min_r if engine else as_float(os.getenv("NEWS_LADDER_MIN_R", "0.55"), 0.55),
                 "NEWS_LADDER_VOLUME_PCT": to_percent(engine.news_ladder_volume_pct if engine else os.getenv("NEWS_LADDER_VOLUME_PCT", "0.35"), 35),
-                "NEWS_LADDER_COOLDOWN_SECONDS": engine.news_ladder_cooldown_seconds if engine else int(os.getenv("NEWS_LADDER_COOLDOWN_SECONDS", "180")),
+                "NEWS_LADDER_COOLDOWN_SECONDS": engine.news_ladder_cooldown_seconds if engine else int(os.getenv("NEWS_LADDER_COOLDOWN_SECONDS", "0")),
                 "WAR_ROOM_ENABLED": engine.features.get("war_room", True) if engine else os.getenv("FEATURE_WAR_ROOM", "true").lower() in ["1", "true", "yes"],
+                "FEATURE_CURRENCY_BASKET_GUARD": engine.currency_basket_guard_enabled if engine else os.getenv("FEATURE_CURRENCY_BASKET_GUARD", "true").lower() in ["1", "true", "yes"],
+                "CURRENCY_BASKET_LIMITS": getattr(engine, "currency_basket_limits", {}) if engine else os.getenv("CURRENCY_BASKET_LIMITS", "USD_SHORT:2,USD_LONG:2,JPY_SHORT:2,JPY_LONG:2"),
+                "FEATURE_WEBHOOK_ALERTS": engine.webhook_alerts_enabled if engine else os.getenv("FEATURE_WEBHOOK_ALERTS", "true").lower() in ["1", "true", "yes"],
                 "MT5_ACCOUNT": os.getenv("MT5_ACCOUNT", ""),
                 "MT5_SERVER": os.getenv("MT5_SERVER", ""),
                 "ENV_ALL": safe_env_for_dashboard(current_env),
@@ -905,32 +1160,34 @@ def api_config():
         env_vars["TRADING_SYMBOLS"] = data.get("TRADING_SYMBOLS", env_vars.get("TRADING_SYMBOLS", ""))
         env_vars["EXECUTION_SYMBOLS"] = data.get("EXECUTION_SYMBOLS", env_vars.get("EXECUTION_SYMBOLS", env_vars.get("TRADING_SYMBOLS", "")))
         env_vars["TRADE_VOLUME"] = data.get("TRADE_VOLUME", env_vars.get("TRADE_VOLUME", "0.001"))
-        env_vars["POSITION_SIZING_MODE"] = "fixed"
-        env_vars["FEATURE_DYNAMIC_ACCOUNT_PROFILE"] = str(data.get("FEATURE_DYNAMIC_ACCOUNT_PROFILE", env_vars.get("FEATURE_DYNAMIC_ACCOUNT_PROFILE", "true"))).lower()
-        env_vars["FEATURE_SMALL_ACCOUNT_MODE"] = str(data.get("FEATURE_SMALL_ACCOUNT_MODE", env_vars.get("FEATURE_SMALL_ACCOUNT_MODE", "false"))).lower()
-        env_vars["SMALL_ACCOUNT_EQUITY_THRESHOLD"] = str(data.get("SMALL_ACCOUNT_EQUITY_THRESHOLD", env_vars.get("SMALL_ACCOUNT_EQUITY_THRESHOLD", "25")))
-        env_vars["SMALL_ACCOUNT_TRADE_VOLUME"] = str(data.get("SMALL_ACCOUNT_TRADE_VOLUME", env_vars.get("SMALL_ACCOUNT_TRADE_VOLUME", "0.001")))
-        env_vars["SMALL_ACCOUNT_MAX_AUTO_MIN_LOT"] = str(data.get("SMALL_ACCOUNT_MAX_AUTO_MIN_LOT", env_vars.get("SMALL_ACCOUNT_MAX_AUTO_MIN_LOT", "0.01")))
-        env_vars["SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT"] = str(from_ui_percent(data.get("SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT", to_percent(normalize_fraction(env_vars.get("SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT", "0.01"), 0.01))), 1.0))
-        env_vars["SMALL_ACCOUNT_MAX_ACTIVE_TRADES"] = str(data.get("SMALL_ACCOUNT_MAX_ACTIVE_TRADES", env_vars.get("SMALL_ACCOUNT_MAX_ACTIVE_TRADES", "1")))
-        env_vars["SMALL_ACCOUNT_ALLOW_METALS"] = str(data.get("SMALL_ACCOUNT_ALLOW_METALS", env_vars.get("SMALL_ACCOUNT_ALLOW_METALS", "false"))).lower()
-        env_vars["SMALL_ACCOUNT_ALLOW_CRYPTO"] = str(data.get("SMALL_ACCOUNT_ALLOW_CRYPTO", env_vars.get("SMALL_ACCOUNT_ALLOW_CRYPTO", "false"))).lower()
-        env_vars["SMALL_ACCOUNT_ALLOW_STOCKS"] = str(data.get("SMALL_ACCOUNT_ALLOW_STOCKS", env_vars.get("SMALL_ACCOUNT_ALLOW_STOCKS", "false"))).lower()
-        env_vars["SMALL_ACCOUNT_DISABLE_NEWS_LADDER"] = str(data.get("SMALL_ACCOUNT_DISABLE_NEWS_LADDER", env_vars.get("SMALL_ACCOUNT_DISABLE_NEWS_LADDER", "true"))).lower()
-        env_vars["SMALL_ACCOUNT_DISABLE_PENDING_ORDERS"] = str(data.get("SMALL_ACCOUNT_DISABLE_PENDING_ORDERS", env_vars.get("SMALL_ACCOUNT_DISABLE_PENDING_ORDERS", "true"))).lower()
+        env_vars["POSITION_SIZING_MODE"] = data.get("POSITION_SIZING_MODE", env_vars.get("POSITION_SIZING_MODE", "fixed"))
+        env_vars["RISK_PER_TRADE_PCT"] = str(data.get("RISK_PER_TRADE_PCT", env_vars.get("RISK_PER_TRADE_PCT", os.getenv("RISK_PER_TRADE_PCT", "0.01"))))
+        env_vars.pop("FEATURE_DYNAMIC_ACCOUNT_PROFILE", None)
+        env_vars.pop("FEATURE_SMALL_ACCOUNT_MODE", None)
+        env_vars.pop("SMALL_ACCOUNT_EQUITY_THRESHOLD", None)
+        env_vars.pop("SMALL_ACCOUNT_TRADE_VOLUME", None)
+        env_vars.pop("SMALL_ACCOUNT_MAX_AUTO_MIN_LOT", None)
+        env_vars.pop("SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT", None)
+        env_vars.pop("SMALL_ACCOUNT_MAX_ACTIVE_TRADES", None)
+        env_vars.pop("SMALL_ACCOUNT_ALLOW_METALS", None)
+        env_vars.pop("SMALL_ACCOUNT_ALLOW_CRYPTO", None)
+        env_vars.pop("SMALL_ACCOUNT_ALLOW_STOCKS", None)
+        env_vars.pop("SMALL_ACCOUNT_DISABLE_NEWS_LADDER", None)
+        env_vars.pop("SMALL_ACCOUNT_DISABLE_PENDING_ORDERS", None)
         env_vars.pop("RISK_PERCENT", None)
         env_vars["MAX_EXPOSURE_PERCENT"] = str(from_ui_percent(data.get("MAX_EXPOSURE_PERCENT", to_percent(normalize_fraction(env_vars.get("MAX_EXPOSURE_PERCENT", "0.05"), 0.05))), 5.0))
         env_vars["MIN_PROFIT_PIPS"] = data.get("MIN_PROFIT_PIPS", env_vars.get("MIN_PROFIT_PIPS", "50"))
         env_vars["DAILY_PROFIT_CAP"] = str(from_ui_percent(data.get("DAILY_PROFIT_CAP", to_percent(normalize_fraction(env_vars.get("DAILY_PROFIT_CAP", "0.02"), 0.02))), 2.0))
-        env_vars["FEATURE_DAILY_LOSS_BRAKE"] = str(data.get("FEATURE_DAILY_LOSS_BRAKE", env_vars.get("FEATURE_DAILY_LOSS_BRAKE", "true"))).lower()
+        env_vars["DAILY_PROFIT_CAP_EXTENSION"] = str(from_ui_percent(data.get("DAILY_PROFIT_CAP_EXTENSION", to_percent(normalize_fraction(env_vars.get("DAILY_PROFIT_CAP_EXTENSION", "0.0"), 0.0))), 0.0))
+        env_vars["FEATURE_DAILY_LOSS_BRAKE"] = "false"
         env_vars["DAILY_LOSS_CAP_PERCENT"] = str(from_ui_percent(data.get("DAILY_LOSS_CAP_PERCENT", to_percent(normalize_fraction(env_vars.get("DAILY_LOSS_CAP_PERCENT", "0.05"), 0.05))), 5.0))
         env_vars["MAX_DAILY_LOSSES"] = str(data.get("MAX_DAILY_LOSSES", env_vars.get("MAX_DAILY_LOSSES", "100")))
         env_vars["MAX_CONSECUTIVE_LOSSES"] = str(data.get("MAX_CONSECUTIVE_LOSSES", env_vars.get("MAX_CONSECUTIVE_LOSSES", "30")))
-        env_vars["LOSS_COOLDOWN_MINUTES"] = str(data.get("LOSS_COOLDOWN_MINUTES", env_vars.get("LOSS_COOLDOWN_MINUTES", "60")))
+        env_vars["LOSS_COOLDOWN_MINUTES"] = str(data.get("LOSS_COOLDOWN_MINUTES", env_vars.get("LOSS_COOLDOWN_MINUTES", "0")))
         env_vars["MAX_ACTIVE_TRADES_TOTAL"] = str(data.get("MAX_ACTIVE_TRADES_TOTAL", env_vars.get("MAX_ACTIVE_TRADES_TOTAL", "10")))
         env_vars["FEATURE_CATASTROPHIC_LOSS_STOP"] = str(data.get("FEATURE_CATASTROPHIC_LOSS_STOP", env_vars.get("FEATURE_CATASTROPHIC_LOSS_STOP", "true"))).lower()
         env_vars["CATASTROPHIC_LOSS_R"] = str(data.get("CATASTROPHIC_LOSS_R", env_vars.get("CATASTROPHIC_LOSS_R", "1.5")))
-        env_vars["CATASTROPHIC_LOSS_COOLDOWN_MINUTES"] = str(data.get("CATASTROPHIC_LOSS_COOLDOWN_MINUTES", env_vars.get("CATASTROPHIC_LOSS_COOLDOWN_MINUTES", "360")))
+        env_vars["CATASTROPHIC_LOSS_COOLDOWN_MINUTES"] = str(data.get("CATASTROPHIC_LOSS_COOLDOWN_MINUTES", env_vars.get("CATASTROPHIC_LOSS_COOLDOWN_MINUTES", "0")))
         env_vars["MIN_EXPECTED_R"] = str(data.get("MIN_EXPECTED_R", env_vars.get("MIN_EXPECTED_R", "1.2")))
         env_vars["MIN_EXPECTED_R_SCALP"] = str(data.get("MIN_EXPECTED_R_SCALP", env_vars.get("MIN_EXPECTED_R_SCALP", "1.0")))
         env_vars["MIN_EXPECTED_R_INTRADAY"] = str(data.get("MIN_EXPECTED_R_INTRADAY", env_vars.get("MIN_EXPECTED_R_INTRADAY", env_vars.get("MIN_EXPECTED_R", "1.2"))))
@@ -959,7 +1216,7 @@ def api_config():
         env_vars["FEATURE_TRAILING_TAKE_PROFIT"] = str(data.get("FEATURE_TRAILING_TAKE_PROFIT", env_vars.get("FEATURE_TRAILING_TAKE_PROFIT", "true"))).lower()
         env_vars["TRAILING_TP_TRIGGER_PCT"] = str(from_percent(data.get("TRAILING_TP_TRIGGER_PCT", env_vars.get("TRAILING_TP_TRIGGER_PCT", "0.85")), 0.85))
         env_vars["TRAILING_TP_EXTENSION_PCT"] = str(from_percent(data.get("TRAILING_TP_EXTENSION_PCT", env_vars.get("TRAILING_TP_EXTENSION_PCT", "0.5")), 0.5))
-        env_vars["TRAILING_TP_COOLDOWN_SECONDS"] = str(data.get("TRAILING_TP_COOLDOWN_SECONDS", env_vars.get("TRAILING_TP_COOLDOWN_SECONDS", "300")))
+        env_vars["TRAILING_TP_COOLDOWN_SECONDS"] = str(data.get("TRAILING_TP_COOLDOWN_SECONDS", env_vars.get("TRAILING_TP_COOLDOWN_SECONDS", "0")))
         env_vars["FEATURE_PARTIAL_TP_EXTEND"] = str(data.get("FEATURE_PARTIAL_TP_EXTEND", env_vars.get("FEATURE_PARTIAL_TP_EXTEND", "true"))).lower()
         env_vars["PARTIAL_TP_EXTEND_PCT"] = str(from_percent(data.get("PARTIAL_TP_EXTEND_PCT", env_vars.get("PARTIAL_TP_EXTEND_PCT", "0.5")), 0.5))
         env_vars["FEATURE_PARTIAL_TAKE_PROFIT"] = str(data.get("FEATURE_PARTIAL_TAKE_PROFIT", env_vars.get("FEATURE_PARTIAL_TAKE_PROFIT", "true"))).lower()
@@ -980,11 +1237,6 @@ def api_config():
         env_vars["MAX_ADVERSE_R_INTRADAY"] = str(data.get("MAX_ADVERSE_R_INTRADAY", env_vars.get("MAX_ADVERSE_R_INTRADAY", "0.90")))
         env_vars["MAX_ADVERSE_R_METAL"] = str(data.get("MAX_ADVERSE_R_METAL", env_vars.get("MAX_ADVERSE_R_METAL", "1.00")))
         env_vars["MAX_ADVERSE_R_SWING"] = str(data.get("MAX_ADVERSE_R_SWING", env_vars.get("MAX_ADVERSE_R_SWING", "1.10")))
-        env_vars["FEATURE_REVERSE_PROFIT_EXIT"] = str(data.get("FEATURE_REVERSE_PROFIT_EXIT", env_vars.get("FEATURE_REVERSE_PROFIT_EXIT", "true"))).lower()
-        env_vars["REVERSE_PROFIT_MIN_R"] = str(data.get("REVERSE_PROFIT_MIN_R", env_vars.get("REVERSE_PROFIT_MIN_R", "1.20")))
-        env_vars["REVERSE_PROFIT_GIVEBACK_PCT"] = str(from_percent(data.get("REVERSE_PROFIT_GIVEBACK_PCT", env_vars.get("REVERSE_PROFIT_GIVEBACK_PCT", "0.45")), 0.45))
-        env_vars["REVERSE_PROFIT_CLOSE_PCT"] = str(from_percent(data.get("REVERSE_PROFIT_CLOSE_PCT", env_vars.get("REVERSE_PROFIT_CLOSE_PCT", "0.5")), 0.5))
-        env_vars["REVERSE_AFTER_PARTIAL_LOCK_R"] = str(data.get("REVERSE_AFTER_PARTIAL_LOCK_R", env_vars.get("REVERSE_AFTER_PARTIAL_LOCK_R", "0.20")))
         env_vars["FEATURE_SYMBOL_PROFILES"] = str(data.get("FEATURE_SYMBOL_PROFILES", env_vars.get("FEATURE_SYMBOL_PROFILES", "true"))).lower()
         env_vars["FEATURE_INSTRUMENT_PROFILES"] = str(data.get("FEATURE_INSTRUMENT_PROFILES", env_vars.get("FEATURE_INSTRUMENT_PROFILES", "true"))).lower()
         for key, default in {
@@ -1043,16 +1295,16 @@ def api_config():
         env_vars["SIGNAL_LOCKOUT_ENABLED"] = str(data.get("SIGNAL_LOCKOUT_ENABLED", env_vars.get("SIGNAL_LOCKOUT_ENABLED", "true"))).lower()
         env_vars["MAX_TRADES_PER_SYMBOL"] = str(data.get("MAX_TRADES_PER_SYMBOL", env_vars.get("MAX_TRADES_PER_SYMBOL", "1")))
         env_vars["TRADE_COOLDOWN_MINUTES"] = str(data.get("TRADE_COOLDOWN_MINUTES", env_vars.get("TRADE_COOLDOWN_MINUTES", "0")))
-        env_vars["FEATURE_COOLDOWN_OVERRIDE"] = str(data.get("FEATURE_COOLDOWN_OVERRIDE", env_vars.get("FEATURE_COOLDOWN_OVERRIDE", "true"))).lower()
+        env_vars["FEATURE_COOLDOWN_OVERRIDE"] = str(data.get("FEATURE_COOLDOWN_OVERRIDE", env_vars.get("FEATURE_COOLDOWN_OVERRIDE", "false"))).lower()
         env_vars["COOLDOWN_OVERRIDE_MIN_GRADE"] = str(data.get("COOLDOWN_OVERRIDE_MIN_GRADE", env_vars.get("COOLDOWN_OVERRIDE_MIN_GRADE", "A"))).upper()
         env_vars["COOLDOWN_OVERRIDE_MIN_SCORE"] = str(data.get("COOLDOWN_OVERRIDE_MIN_SCORE", env_vars.get("COOLDOWN_OVERRIDE_MIN_SCORE", "0.78")))
         env_vars["COOLDOWN_OVERRIDE_MIN_CONVICTION"] = str(data.get("COOLDOWN_OVERRIDE_MIN_CONVICTION", env_vars.get("COOLDOWN_OVERRIDE_MIN_CONVICTION", "0.45")))
         env_vars["COOLDOWN_OVERRIDE_REQUIRE_SPREAD_SAFE"] = str(data.get("COOLDOWN_OVERRIDE_REQUIRE_SPREAD_SAFE", env_vars.get("COOLDOWN_OVERRIDE_REQUIRE_SPREAD_SAFE", "true"))).lower()
         env_vars["COOLDOWN_OVERRIDE_REQUIRE_NEW_STRUCTURE"] = str(data.get("COOLDOWN_OVERRIDE_REQUIRE_NEW_STRUCTURE", env_vars.get("COOLDOWN_OVERRIDE_REQUIRE_NEW_STRUCTURE", "true"))).lower()
-        env_vars["NO_REVENGE_COOLDOWN_SECONDS"] = str(data.get("NO_REVENGE_COOLDOWN_SECONDS", env_vars.get("NO_REVENGE_COOLDOWN_SECONDS", str(24*3600))))
-        env_vars["FEATURE_REVERSAL_SHOCK_GUARD"] = str(data.get("FEATURE_REVERSAL_SHOCK_GUARD", env_vars.get("FEATURE_REVERSAL_SHOCK_GUARD", "true"))).lower()
-        env_vars["REVERSAL_SHOCK_COOLDOWN_MINUTES"] = str(data.get("REVERSAL_SHOCK_COOLDOWN_MINUTES", env_vars.get("REVERSAL_SHOCK_COOLDOWN_MINUTES", "30")))
-        env_vars["REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES"] = str(data.get("REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES", env_vars.get("REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES", "60")))
+        env_vars["NO_REVENGE_COOLDOWN_SECONDS"] = str(data.get("NO_REVENGE_COOLDOWN_SECONDS", env_vars.get("NO_REVENGE_COOLDOWN_SECONDS", "0")))
+        env_vars["FEATURE_REVERSAL_SHOCK_GUARD"] = str(data.get("FEATURE_REVERSAL_SHOCK_GUARD", env_vars.get("FEATURE_REVERSAL_SHOCK_GUARD", "false"))).lower()
+        env_vars["REVERSAL_SHOCK_COOLDOWN_MINUTES"] = str(data.get("REVERSAL_SHOCK_COOLDOWN_MINUTES", env_vars.get("REVERSAL_SHOCK_COOLDOWN_MINUTES", "0")))
+        env_vars["REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES"] = str(data.get("REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES", env_vars.get("REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES", "0")))
         env_vars["FEATURE_OPPOSING_SIGNAL_PROFIT_EXIT"] = str(data.get("FEATURE_OPPOSING_SIGNAL_PROFIT_EXIT", env_vars.get("FEATURE_OPPOSING_SIGNAL_PROFIT_EXIT", "true"))).lower()
         env_vars["OPPOSING_SIGNAL_MIN_R"] = str(data.get("OPPOSING_SIGNAL_MIN_R", env_vars.get("OPPOSING_SIGNAL_MIN_R", "0.20")))
         env_vars["OPPOSING_SIGNAL_MIN_SCORE"] = str(data.get("OPPOSING_SIGNAL_MIN_SCORE", env_vars.get("OPPOSING_SIGNAL_MIN_SCORE", "0.58")))
@@ -1076,8 +1328,11 @@ def api_config():
         env_vars["NEWS_LADDER_MAX_ADDONS"] = str(data.get("NEWS_LADDER_MAX_ADDONS", env_vars.get("NEWS_LADDER_MAX_ADDONS", "2")))
         env_vars["NEWS_LADDER_MIN_R"] = str(data.get("NEWS_LADDER_MIN_R", env_vars.get("NEWS_LADDER_MIN_R", "0.55")))
         env_vars["NEWS_LADDER_VOLUME_PCT"] = str(from_percent(data.get("NEWS_LADDER_VOLUME_PCT", env_vars.get("NEWS_LADDER_VOLUME_PCT", "0.35")), 0.35))
-        env_vars["NEWS_LADDER_COOLDOWN_SECONDS"] = str(data.get("NEWS_LADDER_COOLDOWN_SECONDS", env_vars.get("NEWS_LADDER_COOLDOWN_SECONDS", "180")))
+        env_vars["NEWS_LADDER_COOLDOWN_SECONDS"] = str(data.get("NEWS_LADDER_COOLDOWN_SECONDS", env_vars.get("NEWS_LADDER_COOLDOWN_SECONDS", "0")))
         env_vars["FEATURE_WAR_ROOM"] = str(data.get("WAR_ROOM_ENABLED", env_vars.get("FEATURE_WAR_ROOM", "true"))).lower()
+        env_vars["FEATURE_CURRENCY_BASKET_GUARD"] = str(data.get("FEATURE_CURRENCY_BASKET_GUARD", env_vars.get("FEATURE_CURRENCY_BASKET_GUARD", "true"))).lower()
+        env_vars["CURRENCY_BASKET_LIMITS"] = str(data.get("CURRENCY_BASKET_LIMITS", env_vars.get("CURRENCY_BASKET_LIMITS", "USD_SHORT:2,USD_LONG:2,JPY_SHORT:2,JPY_LONG:2")))
+        env_vars["FEATURE_WEBHOOK_ALERTS"] = str(data.get("FEATURE_WEBHOOK_ALERTS", env_vars.get("FEATURE_WEBHOOK_ALERTS", "true"))).lower()
         env_vars["MT5_ACCOUNT"] = data.get("MT5_ACCOUNT", env_vars.get("MT5_ACCOUNT", ""))
         env_vars["MT5_SERVER"] = data.get("MT5_SERVER", env_vars.get("MT5_SERVER", ""))
 
@@ -1100,45 +1355,16 @@ def api_config():
                     engine.volume = float(data["TRADE_VOLUME"])
                 except Exception:
                     pass
-            engine.position_sizing_mode = "fixed"
-            engine.risk_pct = 0.0
-            if "FEATURE_SMALL_ACCOUNT_MODE" in data:
-                engine.small_account_mode_enabled = parse_bool(data["FEATURE_SMALL_ACCOUNT_MODE"])
-            if "SMALL_ACCOUNT_EQUITY_THRESHOLD" in data:
+            if "POSITION_SIZING_MODE" in data:
                 try:
-                    engine.small_account_threshold = max(1.0, float(data["SMALL_ACCOUNT_EQUITY_THRESHOLD"]))
+                    engine.position_sizing_mode = str(data["POSITION_SIZING_MODE"]).strip().lower() or "fixed"
                 except Exception:
                     pass
-            if "SMALL_ACCOUNT_TRADE_VOLUME" in data:
+            if "RISK_PER_TRADE_PCT" in data:
                 try:
-                    engine.small_account_trade_volume = max(0.001, float(data["SMALL_ACCOUNT_TRADE_VOLUME"]))
+                    engine.risk_pct = float(data["RISK_PER_TRADE_PCT"])
                 except Exception:
                     pass
-            if "SMALL_ACCOUNT_MAX_AUTO_MIN_LOT" in data:
-                try:
-                    engine.small_account_max_auto_min_lot = max(0.001, float(data["SMALL_ACCOUNT_MAX_AUTO_MIN_LOT"]))
-                except Exception:
-                    pass
-            if "SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT" in data:
-                try:
-                    engine.small_account_max_exposure_pct = from_ui_percent(data["SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT"], 1.0)
-                except Exception:
-                    pass
-            if "SMALL_ACCOUNT_MAX_ACTIVE_TRADES" in data:
-                try:
-                    engine.small_account_max_active_trades = max(1, min(5, int(data["SMALL_ACCOUNT_MAX_ACTIVE_TRADES"])))
-                except Exception:
-                    pass
-            if "SMALL_ACCOUNT_ALLOW_METALS" in data:
-                engine.small_account_allow_metals = parse_bool(data["SMALL_ACCOUNT_ALLOW_METALS"])
-            if "SMALL_ACCOUNT_ALLOW_CRYPTO" in data:
-                engine.small_account_allow_crypto = parse_bool(data["SMALL_ACCOUNT_ALLOW_CRYPTO"])
-            if "SMALL_ACCOUNT_ALLOW_STOCKS" in data:
-                engine.small_account_allow_stocks = parse_bool(data["SMALL_ACCOUNT_ALLOW_STOCKS"])
-            if "SMALL_ACCOUNT_DISABLE_NEWS_LADDER" in data:
-                engine.small_account_disable_news_ladder = parse_bool(data["SMALL_ACCOUNT_DISABLE_NEWS_LADDER"])
-            if "SMALL_ACCOUNT_DISABLE_PENDING_ORDERS" in data:
-                engine.small_account_disable_pending_orders = parse_bool(data["SMALL_ACCOUNT_DISABLE_PENDING_ORDERS"])
             if "MAX_EXPOSURE_PERCENT" in data:
                 try:
                     engine.max_exposure_pct = from_ui_percent(data["MAX_EXPOSURE_PERCENT"], 5.0)
@@ -1154,8 +1380,12 @@ def api_config():
                     engine.daily_profit_cap = from_ui_percent(data["DAILY_PROFIT_CAP"], 2.0)
                 except Exception:
                     pass
-            if "FEATURE_DAILY_LOSS_BRAKE" in data:
-                engine.daily_loss_brake_enabled = parse_bool(data["FEATURE_DAILY_LOSS_BRAKE"])
+            if "DAILY_PROFIT_CAP_EXTENSION" in data:
+                try:
+                    engine.daily_profit_cap_extension = from_ui_percent(data["DAILY_PROFIT_CAP_EXTENSION"], 0.0)
+                except Exception:
+                    pass
+            # Daily loss brake is permanently disabled for this account.
             if "DAILY_LOSS_CAP_PERCENT" in data:
                 try:
                     engine.daily_loss_cap_pct = from_ui_percent(data["DAILY_LOSS_CAP_PERCENT"], 5.0)
@@ -1364,28 +1594,6 @@ def api_config():
                     engine.max_adverse_r = max(0.1, min(2.0, float(data["MAX_ADVERSE_R"])))
                 except Exception:
                     pass
-            if "FEATURE_REVERSE_PROFIT_EXIT" in data:
-                engine.reverse_profit_exit_enabled = parse_bool(data["FEATURE_REVERSE_PROFIT_EXIT"])
-            if "REVERSE_PROFIT_MIN_R" in data:
-                try:
-                    engine.reverse_profit_min_r = float(data["REVERSE_PROFIT_MIN_R"])
-                except Exception:
-                    pass
-            if "REVERSE_PROFIT_GIVEBACK_PCT" in data:
-                try:
-                    engine.reverse_profit_giveback_pct = from_percent(data["REVERSE_PROFIT_GIVEBACK_PCT"], 0.45)
-                except Exception:
-                    pass
-            if "REVERSE_PROFIT_CLOSE_PCT" in data:
-                try:
-                    engine.reverse_profit_close_pct = from_percent(data["REVERSE_PROFIT_CLOSE_PCT"], 0.5)
-                except Exception:
-                    pass
-            if "REVERSE_AFTER_PARTIAL_LOCK_R" in data:
-                try:
-                    engine.reverse_after_partial_lock_r = float(data["REVERSE_AFTER_PARTIAL_LOCK_R"])
-                except Exception:
-                    pass
             if "FEATURE_SYMBOL_PROFILES" in data:
                 try:
                     engine.symbol_profiles_enabled = str(data["FEATURE_SYMBOL_PROFILES"]).lower() in ["1", "true", "yes", "on"]
@@ -1548,6 +1756,21 @@ def api_config():
                     engine.features["war_room"] = bool(data["WAR_ROOM_ENABLED"])
                 except Exception:
                     pass
+            if "FEATURE_CURRENCY_BASKET_GUARD" in data:
+                try:
+                    engine.currency_basket_guard_enabled = parse_bool(data["FEATURE_CURRENCY_BASKET_GUARD"])
+                except Exception:
+                    pass
+            if "CURRENCY_BASKET_LIMITS" in data:
+                try:
+                    engine.currency_basket_limits = engine._parse_currency_basket_limits(data["CURRENCY_BASKET_LIMITS"])
+                except Exception:
+                    pass
+            if "FEATURE_WEBHOOK_ALERTS" in data:
+                try:
+                    engine.webhook_alerts_enabled = parse_bool(data["FEATURE_WEBHOOK_ALERTS"])
+                except Exception:
+                    pass
             engine.rule_config = {"ema": False, "volume": False, "po3": False}
 
         # write back to .env
@@ -1562,28 +1785,22 @@ def api_config():
             f.write(f"TELEGRAM_CHAT_ID={env_vars.get('TELEGRAM_CHAT_ID', '')}\n\n")
             f.write("# Discord Notifications (Optional)\n")
             f.write(f"DISCORD_WEBHOOK={env_vars.get('DISCORD_WEBHOOK', '')}\n\n")
+            f.write("# Risk & Telemetry (Optional)\n")
+            f.write(f"FEATURE_CURRENCY_BASKET_GUARD={env_vars.get('FEATURE_CURRENCY_BASKET_GUARD', 'true')}\n")
+            f.write(f"CURRENCY_BASKET_LIMITS={env_vars.get('CURRENCY_BASKET_LIMITS', 'USD_SHORT:2,USD_LONG:2,JPY_SHORT:2,JPY_LONG:2')}\n")
+            f.write(f"FEATURE_WEBHOOK_ALERTS={env_vars.get('FEATURE_WEBHOOK_ALERTS', 'true')}\n\n")
             f.write("# Trading Settings\n")
             f.write(f"TRADING_SYMBOLS={env_vars['TRADING_SYMBOLS']}\n")
             f.write(f"EXECUTION_SYMBOLS={env_vars.get('EXECUTION_SYMBOLS', env_vars.get('TRADING_SYMBOLS', ''))}\n")
             f.write(f"TIMEFRAME={env_vars.get('TIMEFRAME', 'M5')}\n")
             f.write(f"TRADE_VOLUME={env_vars['TRADE_VOLUME']}\n")
-            f.write("POSITION_SIZING_MODE=fixed\n")
-            f.write(f"FEATURE_DYNAMIC_ACCOUNT_PROFILE={env_vars.get('FEATURE_DYNAMIC_ACCOUNT_PROFILE', 'true')}\n")
-            f.write(f"FEATURE_SMALL_ACCOUNT_MODE={env_vars.get('FEATURE_SMALL_ACCOUNT_MODE', 'false')}\n")
-            f.write(f"SMALL_ACCOUNT_EQUITY_THRESHOLD={env_vars.get('SMALL_ACCOUNT_EQUITY_THRESHOLD', '25')}\n")
-            f.write(f"SMALL_ACCOUNT_TRADE_VOLUME={env_vars.get('SMALL_ACCOUNT_TRADE_VOLUME', '0.001')}\n")
-            f.write(f"SMALL_ACCOUNT_MAX_AUTO_MIN_LOT={env_vars.get('SMALL_ACCOUNT_MAX_AUTO_MIN_LOT', '0.01')}\n")
-            f.write(f"SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT={env_vars.get('SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT', '0.01')}\n")
-            f.write(f"SMALL_ACCOUNT_MAX_ACTIVE_TRADES={env_vars.get('SMALL_ACCOUNT_MAX_ACTIVE_TRADES', '1')}\n")
-            f.write(f"SMALL_ACCOUNT_ALLOW_METALS={env_vars.get('SMALL_ACCOUNT_ALLOW_METALS', 'false')}\n")
-            f.write(f"SMALL_ACCOUNT_ALLOW_CRYPTO={env_vars.get('SMALL_ACCOUNT_ALLOW_CRYPTO', 'false')}\n")
-            f.write(f"SMALL_ACCOUNT_ALLOW_STOCKS={env_vars.get('SMALL_ACCOUNT_ALLOW_STOCKS', 'false')}\n")
-            f.write(f"SMALL_ACCOUNT_DISABLE_NEWS_LADDER={env_vars.get('SMALL_ACCOUNT_DISABLE_NEWS_LADDER', 'true')}\n")
-            f.write(f"SMALL_ACCOUNT_DISABLE_PENDING_ORDERS={env_vars.get('SMALL_ACCOUNT_DISABLE_PENDING_ORDERS', 'true')}\n")
+            f.write(f"POSITION_SIZING_MODE={env_vars.get('POSITION_SIZING_MODE','fixed')}\n")
+            f.write(f"RISK_PER_TRADE_PCT={env_vars.get('RISK_PER_TRADE_PCT', '0.01')}\n")
             f.write(f"MAX_EXPOSURE_PERCENT={env_vars.get('MAX_EXPOSURE_PERCENT', '5')}\n")
             f.write(f"MIN_PROFIT_PIPS={env_vars.get('MIN_PROFIT_PIPS', '50')}\n")
             f.write(f"DAILY_PROFIT_CAP={env_vars.get('DAILY_PROFIT_CAP', '0.02')}\n")
-            f.write(f"FEATURE_DAILY_LOSS_BRAKE={env_vars.get('FEATURE_DAILY_LOSS_BRAKE', 'true')}\n")
+            f.write(f"DAILY_PROFIT_CAP_EXTENSION={env_vars.get('DAILY_PROFIT_CAP_EXTENSION', '0.0')}\n")
+            f.write(f"FEATURE_DAILY_LOSS_BRAKE={env_vars.get('FEATURE_DAILY_LOSS_BRAKE', 'false')}\n")
             f.write(f"DAILY_LOSS_CAP_PERCENT={env_vars.get('DAILY_LOSS_CAP_PERCENT', '0.05')}\n")
             f.write(f"MAX_DAILY_LOSSES={env_vars.get('MAX_DAILY_LOSSES', '100')}\n")
             f.write(f"MAX_CONSECUTIVE_LOSSES={env_vars.get('MAX_CONSECUTIVE_LOSSES', '30')}\n")
@@ -1675,7 +1892,7 @@ def api_config():
             f.write(f"FEATURE_TRAILING_TAKE_PROFIT={env_vars.get('FEATURE_TRAILING_TAKE_PROFIT', 'true')}\n")
             f.write(f"TRAILING_TP_TRIGGER_PCT={env_vars.get('TRAILING_TP_TRIGGER_PCT', '0.85')}\n")
             f.write(f"TRAILING_TP_EXTENSION_PCT={env_vars.get('TRAILING_TP_EXTENSION_PCT', '0.5')}\n")
-            f.write(f"TRAILING_TP_COOLDOWN_SECONDS={env_vars.get('TRAILING_TP_COOLDOWN_SECONDS', '300')}\n")
+            f.write(f"TRAILING_TP_COOLDOWN_SECONDS={env_vars.get('TRAILING_TP_COOLDOWN_SECONDS', '0')}\n")
             f.write(f"FEATURE_PARTIAL_TP_EXTEND={env_vars.get('FEATURE_PARTIAL_TP_EXTEND', 'true')}\n")
             f.write(f"PARTIAL_TP_EXTEND_PCT={env_vars.get('PARTIAL_TP_EXTEND_PCT', '0.5')}\n")
             f.write(f"FEATURE_PARTIAL_TAKE_PROFIT={env_vars.get('FEATURE_PARTIAL_TAKE_PROFIT', 'true')}\n")
@@ -1696,11 +1913,6 @@ def api_config():
             f.write(f"MAX_ADVERSE_R_INTRADAY={env_vars.get('MAX_ADVERSE_R_INTRADAY', '0.90')}\n")
             f.write(f"MAX_ADVERSE_R_METAL={env_vars.get('MAX_ADVERSE_R_METAL', '1.00')}\n")
             f.write(f"MAX_ADVERSE_R_SWING={env_vars.get('MAX_ADVERSE_R_SWING', '1.10')}\n")
-            f.write(f"FEATURE_REVERSE_PROFIT_EXIT={env_vars.get('FEATURE_REVERSE_PROFIT_EXIT', 'true')}\n")
-            f.write(f"REVERSE_PROFIT_MIN_R={env_vars.get('REVERSE_PROFIT_MIN_R', '1.20')}\n")
-            f.write(f"REVERSE_PROFIT_GIVEBACK_PCT={env_vars.get('REVERSE_PROFIT_GIVEBACK_PCT', '0.45')}\n")
-            f.write(f"REVERSE_PROFIT_CLOSE_PCT={env_vars.get('REVERSE_PROFIT_CLOSE_PCT', '0.5')}\n")
-            f.write(f"REVERSE_AFTER_PARTIAL_LOCK_R={env_vars.get('REVERSE_AFTER_PARTIAL_LOCK_R', '0.20')}\n")
             f.write(f"FEATURE_SYMBOL_PROFILES={env_vars.get('FEATURE_SYMBOL_PROFILES', 'true')}\n")
             f.write(f"FEATURE_TRADE_HORIZON_PROFILES={env_vars.get('FEATURE_TRADE_HORIZON_PROFILES', 'true')}\n")
             f.write(f"HORIZON_PROFILE_MODE={env_vars.get('HORIZON_PROFILE_MODE', 'exit_only')}\n")
@@ -1710,16 +1922,16 @@ def api_config():
             f.write(f"SIGNAL_LOCKOUT_ENABLED={env_vars.get('SIGNAL_LOCKOUT_ENABLED', 'true')}\n")
             f.write(f"MAX_TRADES_PER_SYMBOL={env_vars.get('MAX_TRADES_PER_SYMBOL', '1')}\n")
             f.write(f"TRADE_COOLDOWN_MINUTES={env_vars.get('TRADE_COOLDOWN_MINUTES', '0')}\n")
-            f.write(f"FEATURE_COOLDOWN_OVERRIDE={env_vars.get('FEATURE_COOLDOWN_OVERRIDE', 'true')}\n")
+            f.write(f"FEATURE_COOLDOWN_OVERRIDE={env_vars.get('FEATURE_COOLDOWN_OVERRIDE', 'false')}\n")
             f.write(f"COOLDOWN_OVERRIDE_MIN_GRADE={env_vars.get('COOLDOWN_OVERRIDE_MIN_GRADE', 'A')}\n")
             f.write(f"COOLDOWN_OVERRIDE_MIN_SCORE={env_vars.get('COOLDOWN_OVERRIDE_MIN_SCORE', '0.78')}\n")
             f.write(f"COOLDOWN_OVERRIDE_MIN_CONVICTION={env_vars.get('COOLDOWN_OVERRIDE_MIN_CONVICTION', '0.45')}\n")
             f.write(f"COOLDOWN_OVERRIDE_REQUIRE_SPREAD_SAFE={env_vars.get('COOLDOWN_OVERRIDE_REQUIRE_SPREAD_SAFE', 'true')}\n")
             f.write(f"COOLDOWN_OVERRIDE_REQUIRE_NEW_STRUCTURE={env_vars.get('COOLDOWN_OVERRIDE_REQUIRE_NEW_STRUCTURE', 'true')}\n")
-            f.write(f"NO_REVENGE_COOLDOWN_SECONDS={env_vars.get('NO_REVENGE_COOLDOWN_SECONDS', str(24*3600))}\n")
-            f.write(f"FEATURE_REVERSAL_SHOCK_GUARD={env_vars.get('FEATURE_REVERSAL_SHOCK_GUARD', 'true')}\n")
-            f.write(f"REVERSAL_SHOCK_COOLDOWN_MINUTES={env_vars.get('REVERSAL_SHOCK_COOLDOWN_MINUTES', '30')}\n")
-            f.write(f"REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES={env_vars.get('REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES', '60')}\n")
+            f.write(f"NO_REVENGE_COOLDOWN_SECONDS={env_vars.get('NO_REVENGE_COOLDOWN_SECONDS', '0')}\n")
+            f.write(f"FEATURE_REVERSAL_SHOCK_GUARD={env_vars.get('FEATURE_REVERSAL_SHOCK_GUARD', 'false')}\n")
+            f.write(f"REVERSAL_SHOCK_COOLDOWN_MINUTES={env_vars.get('REVERSAL_SHOCK_COOLDOWN_MINUTES', '0')}\n")
+            f.write(f"REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES={env_vars.get('REVERSAL_SHOCK_XAU_COOLDOWN_MINUTES', '0')}\n")
             f.write(f"FEATURE_OPPOSING_SIGNAL_PROFIT_EXIT={env_vars.get('FEATURE_OPPOSING_SIGNAL_PROFIT_EXIT', 'true')}\n")
             f.write(f"OPPOSING_SIGNAL_MIN_R={env_vars.get('OPPOSING_SIGNAL_MIN_R', '0.20')}\n")
             f.write(f"OPPOSING_SIGNAL_MIN_SCORE={env_vars.get('OPPOSING_SIGNAL_MIN_SCORE', '0.58')}\n")
@@ -1743,7 +1955,7 @@ def api_config():
             f.write(f"NEWS_LADDER_MAX_ADDONS={env_vars.get('NEWS_LADDER_MAX_ADDONS', '2')}\n")
             f.write(f"NEWS_LADDER_MIN_R={env_vars.get('NEWS_LADDER_MIN_R', '0.55')}\n")
             f.write(f"NEWS_LADDER_VOLUME_PCT={env_vars.get('NEWS_LADDER_VOLUME_PCT', '0.35')}\n")
-            f.write(f"NEWS_LADDER_COOLDOWN_SECONDS={env_vars.get('NEWS_LADDER_COOLDOWN_SECONDS', '180')}\n")
+            f.write(f"NEWS_LADDER_COOLDOWN_SECONDS={env_vars.get('NEWS_LADDER_COOLDOWN_SECONDS', '0')}\n")
             f.write(f"FEATURE_WAR_ROOM={env_vars.get('FEATURE_WAR_ROOM', 'true')}\n\n")
             f.write("# Saved UI Settings Mirror\n")
             for key in sorted(env_vars.keys()):
@@ -1774,22 +1986,14 @@ def api_config():
                 ]
                 engine.volume = float(env_vars.get("TRADE_VOLUME", engine.volume))
                 engine.base_trade_volume = engine.volume
-                engine.position_sizing_mode = "fixed"
-                engine.risk_pct = 0.0
-                engine.dynamic_account_profile_enabled = parse_bool(env_vars.get("FEATURE_DYNAMIC_ACCOUNT_PROFILE", engine.dynamic_account_profile_enabled))
-                engine.small_account_mode_enabled = parse_bool(env_vars.get("FEATURE_SMALL_ACCOUNT_MODE", engine.small_account_mode_enabled))
-                engine.small_account_threshold = float(env_vars.get("SMALL_ACCOUNT_EQUITY_THRESHOLD", engine.small_account_threshold))
-                engine.small_account_trade_volume = float(env_vars.get("SMALL_ACCOUNT_TRADE_VOLUME", engine.small_account_trade_volume))
-                engine.small_account_max_auto_min_lot = float(env_vars.get("SMALL_ACCOUNT_MAX_AUTO_MIN_LOT", engine.small_account_max_auto_min_lot))
-                engine.small_account_max_exposure_pct = normalize_fraction(env_vars.get("SMALL_ACCOUNT_MAX_EXPOSURE_PERCENT", engine.small_account_max_exposure_pct), engine.small_account_max_exposure_pct)
-                engine.small_account_max_active_trades = int(env_vars.get("SMALL_ACCOUNT_MAX_ACTIVE_TRADES", engine.small_account_max_active_trades))
-                engine.small_account_allow_metals = parse_bool(env_vars.get("SMALL_ACCOUNT_ALLOW_METALS", engine.small_account_allow_metals))
-                engine.small_account_allow_crypto = parse_bool(env_vars.get("SMALL_ACCOUNT_ALLOW_CRYPTO", engine.small_account_allow_crypto))
-                engine.small_account_allow_stocks = parse_bool(env_vars.get("SMALL_ACCOUNT_ALLOW_STOCKS", engine.small_account_allow_stocks))
-                engine.small_account_disable_news_ladder = parse_bool(env_vars.get("SMALL_ACCOUNT_DISABLE_NEWS_LADDER", engine.small_account_disable_news_ladder))
-                engine.small_account_disable_pending_orders = parse_bool(env_vars.get("SMALL_ACCOUNT_DISABLE_PENDING_ORDERS", engine.small_account_disable_pending_orders))
+                engine.position_sizing_mode = env_vars.get('POSITION_SIZING_MODE', engine.position_sizing_mode)
+                try:
+                    engine.risk_pct = float(env_vars.get('RISK_PER_TRADE_PCT', getattr(engine, 'risk_pct', 0.01)))
+                except Exception:
+                    engine.risk_pct = getattr(engine, 'risk_pct', 0.01)
                 engine.max_exposure_pct = normalize_fraction(env_vars.get("MAX_EXPOSURE_PERCENT", engine.max_exposure_pct), engine.max_exposure_pct)
                 engine.daily_profit_cap = normalize_fraction(env_vars.get("DAILY_PROFIT_CAP", engine.daily_profit_cap), engine.daily_profit_cap)
+                engine.daily_profit_cap_extension = normalize_fraction(env_vars.get("DAILY_PROFIT_CAP_EXTENSION", engine.daily_profit_cap_extension), engine.daily_profit_cap_extension)
                 engine.daily_loss_brake_enabled = parse_bool(env_vars.get("FEATURE_DAILY_LOSS_BRAKE", engine.daily_loss_brake_enabled))
                 engine.daily_loss_cap_pct = normalize_fraction(env_vars.get("DAILY_LOSS_CAP_PERCENT", engine.daily_loss_cap_pct), engine.daily_loss_cap_pct)
                 engine.max_daily_losses = max(0, min(100, int(env_vars.get("MAX_DAILY_LOSSES", engine.max_daily_losses))))
